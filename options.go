@@ -26,7 +26,7 @@ type options struct {
 func defaultOptions() options {
 	// TODO: verify defaults
 	return options{
-		groupName: "_group",
+		groupName: "_defaultgroup",
 
 		store:       nullStore{},
 		storeFilter: func(string) bool { return true },

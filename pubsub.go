@@ -2,29 +2,34 @@ package flow
 
 import "sync"
 
-// PubSubHandler represents a handler for the pub/sub system.
+// PubSubHandler represents a handler for the plugged-in pub/sub system.
 type PubSubHandler func(stream string, data []byte)
 
-// Publisher defines an interface for publishing binary data.
-// It is used as the publishing side of the pub/sub system.
-type Publisher interface {
-	Publish(stream string, data []byte) error
-}
-
-// Subscriber defines an interface for subscribing to and
-// unsubscribing from a stream. It is used as the subscribing
-// side of the pub/sub system.
+// PubSub defines an interface for the pluggable pub/sub system.
 //
-// The subscriber has to support grouping, where only one
-// subscribed handler is called within a single group.
-type Subscriber interface {
+// The Publish method describes the publishing side of the pub/sub
+// system and is used to publish binary data to a specific stream
+// (also known as topic).
+//
+// The Subscribe and Unsubscribe methods define the subscribing side
+// of the pub/sub system and are used to subscribe to and unsubscribe
+// from a stream respectively. The subscription has to support queue
+// grouping, where a message is delivered to only one subscriber in
+// a group.
+type PubSub interface {
+	Publish(stream string, data []byte) error
 	Subscribe(stream, group string, h PubSubHandler) error
 	Unsubscribe(stream string) error
 }
 
+//
+// The subscriber has to support grouping, where only one
+// subscribed handler is called within a single group.
+type Subscriber interface {
+}
+
 type pubsub struct {
-	pub         Publisher
-	sub         Subscriber
+	PubSub
 	groupStream string
 	nodeStream  string
 
@@ -32,10 +37,9 @@ type pubsub struct {
 	subs    map[string]struct{}
 }
 
-func newPubSub(pub Publisher, sub Subscriber, opts options) pubsub {
+func newPubSub(ps PubSub, opts options) pubsub {
 	return pubsub{
-		pub:         pub,
-		sub:         sub,
+		PubSub:      ps,
 		groupStream: opts.groupName,
 		nodeStream:  opts.groupName + "." + opts.nodeKey.String(),
 		subs:        make(map[string]struct{}),
@@ -43,7 +47,7 @@ func newPubSub(pub Publisher, sub Subscriber, opts options) pubsub {
 }
 
 func (ps *pubsub) sendToGroup(msg message) error {
-	if err := ps.pub.Publish(ps.groupStream, msg); err != nil {
+	if err := ps.PubSub.Publish(ps.groupStream, msg); err != nil {
 		logf("group publish error: %v", err)
 		return err
 	}
@@ -52,7 +56,7 @@ func (ps *pubsub) sendToGroup(msg message) error {
 
 func (ps *pubsub) sendToNode(target key, msg message) error {
 	stream := ps.groupStream + "." + target.String()
-	if err := ps.pub.Publish(stream, msg); err != nil {
+	if err := ps.PubSub.Publish(stream, msg); err != nil {
 		logf("node send error: %v", err)
 		return err
 	}
@@ -60,22 +64,22 @@ func (ps *pubsub) sendToNode(target key, msg message) error {
 }
 
 func (ps *pubsub) publish(stream string, msg message) error {
-	return ps.pub.Publish(stream, msg)
+	return ps.PubSub.Publish(stream, msg)
 }
 
 func (ps *pubsub) subscribeGroup(h PubSubHandler) error {
-	if err := ps.sub.Subscribe(ps.groupStream, "", h); err != nil {
+	if err := ps.PubSub.Subscribe(ps.groupStream, "", h); err != nil {
 		return err
 	}
-	if err := ps.sub.Subscribe(ps.nodeStream, "", h); err != nil {
-		ps.sub.Unsubscribe(ps.nodeStream)
+	if err := ps.PubSub.Subscribe(ps.nodeStream, "", h); err != nil {
+		ps.PubSub.Unsubscribe(ps.groupStream)
 		return err
 	}
 	return nil
 }
 
 func (ps *pubsub) subscribe(stream string, h PubSubHandler) error {
-	if err := ps.sub.Subscribe(stream, ps.groupStream, h); err != nil {
+	if err := ps.PubSub.Subscribe(stream, ps.groupStream, h); err != nil {
 		return err
 	}
 	ps.subsMtx.Lock()
@@ -87,10 +91,10 @@ func (ps *pubsub) subscribe(stream string, h PubSubHandler) error {
 func (ps *pubsub) shutdown() {
 	ps.subsMtx.Lock()
 	for stream := range ps.subs {
-		ps.sub.Unsubscribe(stream)
+		ps.PubSub.Unsubscribe(stream)
 	}
 	ps.subsMtx.Unlock()
 
-	ps.sub.Unsubscribe(ps.nodeStream)
-	ps.sub.Unsubscribe(ps.groupStream)
+	ps.PubSub.Unsubscribe(ps.nodeStream)
+	ps.PubSub.Unsubscribe(ps.groupStream)
 }

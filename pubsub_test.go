@@ -7,16 +7,14 @@ import (
 )
 
 func TestPubSubNewPubSub(t *testing.T) {
-	ps := newPubSub(newPublishRecorder(), newSubscriptionRecorder(), options{
+	ps := newPubSub(newPubsubRecorder(), options{
 		groupName: "group",
 		nodeKey:   intKey(7),
 	})
 
 	switch {
-	case ps.pub == nil:
-		t.Fatal("no publisher")
-	case ps.sub == nil:
-		t.Fatal("no subscriber")
+	case ps.PubSub == nil:
+		t.Fatal("no pub/sub")
 	case ps.groupStream != "group":
 		t.Fatalf("unexpected group stream: %s", ps.groupStream)
 	case ps.nodeStream != "group.0000000000000000000000000000000000000007":
@@ -28,15 +26,15 @@ func TestPubSubNewPubSub(t *testing.T) {
 
 func TestPubSubSendToGroup(t *testing.T) {
 	msg := message("group message")
-	pub := newPublishRecorder()
+	rec := newPubsubRecorder()
 	ps := pubsub{
-		pub:         pub,
+		PubSub:      rec,
 		groupStream: "group",
 	}
 
 	var sendErr error
 	go func() { sendErr = ps.sendToGroup(msg) }()
-	sentMsg := <-pub.channel("group")
+	sentMsg := <-rec.pubchan("group")
 
 	switch {
 	case sendErr != nil:
@@ -48,15 +46,15 @@ func TestPubSubSendToGroup(t *testing.T) {
 
 func TestPubSubSendToNode(t *testing.T) {
 	msg := message("node message")
-	pub := newPublishRecorder()
+	rec := newPubsubRecorder()
 	ps := pubsub{
-		pub:         pub,
+		PubSub:      rec,
 		groupStream: "group",
 	}
 
 	var sendErr error
 	go func() { sendErr = ps.sendToNode(intKey(7), msg) }()
-	sentMsg := <-pub.channel("group.0000000000000000000000000000000000000007")
+	sentMsg := <-rec.pubchan("group.0000000000000000000000000000000000000007")
 
 	switch {
 	case sendErr != nil:
@@ -68,12 +66,12 @@ func TestPubSubSendToNode(t *testing.T) {
 
 func TestPubSubPublish(t *testing.T) {
 	msg := message("message")
-	pub := newPublishRecorder()
-	ps := pubsub{pub: pub}
+	rec := newPubsubRecorder()
+	ps := pubsub{PubSub: rec}
 
 	var sendErr error
 	go func() { sendErr = ps.publish("stream", msg) }()
-	sentMsg := <-pub.channel("stream")
+	sentMsg := <-rec.pubchan("stream")
 
 	switch {
 	case sendErr != nil:
@@ -84,9 +82,9 @@ func TestPubSubPublish(t *testing.T) {
 }
 
 func TestPubSubSubscribeGroup(t *testing.T) {
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	ps := pubsub{
-		sub:         sub,
+		PubSub:      rec,
 		groupStream: "group",
 		nodeStream:  "node",
 	}
@@ -96,7 +94,7 @@ func TestPubSubSubscribeGroup(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	s := sub.get("group")
+	s := rec.sub("group")
 	switch {
 	case s == nil:
 		t.Fatal("no group subscriptions")
@@ -104,7 +102,7 @@ func TestPubSubSubscribeGroup(t *testing.T) {
 		t.Fatalf("unexpected subscription group: %s", s.group)
 	}
 
-	s = sub.get("node")
+	s = rec.sub("node")
 	switch {
 	case s == nil:
 		t.Fatal("no node subscriptions")
@@ -114,9 +112,9 @@ func TestPubSubSubscribeGroup(t *testing.T) {
 }
 
 func TestPubSubSubscribe(t *testing.T) {
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	ps := pubsub{
-		sub:         sub,
+		PubSub:      rec,
 		groupStream: "group",
 		subs:        make(map[string]struct{}),
 	}
@@ -129,7 +127,7 @@ func TestPubSubSubscribe(t *testing.T) {
 		t.Fatal("missing tracked subscription")
 	}
 
-	s := sub.get("stream")
+	s := rec.sub("stream")
 	switch {
 	case s == nil:
 		t.Fatal("missing subscription")
@@ -139,14 +137,14 @@ func TestPubSubSubscribe(t *testing.T) {
 }
 
 func TestPubSubShutdown(t *testing.T) {
-	sub := newSubscriptionRecorder()
-	sub.Subscribe("group", "", nil)
-	sub.Subscribe("node", "", nil)
-	sub.Subscribe("stream one", "", nil)
-	sub.Subscribe("stream two", "", nil)
+	rec := newPubsubRecorder()
+	rec.Subscribe("group", "", nil)
+	rec.Subscribe("node", "", nil)
+	rec.Subscribe("stream one", "", nil)
+	rec.Subscribe("stream two", "", nil)
 
 	ps := pubsub{
-		sub:         sub,
+		PubSub:      rec,
 		groupStream: "group",
 		nodeStream:  "node",
 		subs:        make(map[string]struct{}),
@@ -155,65 +153,43 @@ func TestPubSubShutdown(t *testing.T) {
 	ps.subs["stream two"] = struct{}{}
 
 	ps.shutdown()
-	if nsubs := sub.countSubs(); nsubs != 0 {
+	if nsubs := rec.countSubs(); nsubs != 0 {
 		t.Fatalf("unexpected number of subscriptions: %d", nsubs)
 	}
 }
 
-type publishRecorder struct {
-	mtx   sync.Mutex
-	chans map[string]chan message // stream => message channel
-}
-
-func newPublishRecorder() *publishRecorder {
-	return &publishRecorder{
-		chans: make(map[string]chan message),
-	}
-}
-
-func (r *publishRecorder) Publish(stream string, data []byte) error {
-	ch := r.channel(stream)
-	ch <- data
-	return nil
-}
-
-func (r *publishRecorder) channel(stream string) chan message {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
-
-	ch, has := r.chans[stream]
-	if !has {
-		ch = make(chan message)
-		r.chans[stream] = ch
-	}
-	return ch
-}
-
-func (r *publishRecorder) clear() {
-	r.mtx.Lock()
-	r.chans = map[string]chan message{}
-	r.mtx.Unlock()
-}
+// pubsub stub
 
 type subscription struct {
 	group   string
 	handler PubSubHandler
 }
 
-type subscriptionRecorder struct {
-	mtx  sync.Mutex
-	subs map[string]*subscription // stream => subscription
+type pubsubRecorder struct {
+	pubMtx sync.Mutex
+	pubs   map[string]chan message // stream => message channel
+
+	subMtx sync.Mutex
+	subs   map[string]*subscription // stream => subscription
+
 }
 
-func newSubscriptionRecorder() *subscriptionRecorder {
-	return &subscriptionRecorder{
+func newPubsubRecorder() *pubsubRecorder {
+	return &pubsubRecorder{
+		pubs: make(map[string]chan message),
 		subs: make(map[string]*subscription),
 	}
 }
 
-func (r *subscriptionRecorder) Subscribe(stream, group string, h PubSubHandler) error {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
+func (r *pubsubRecorder) Publish(stream string, data []byte) error {
+	ch := r.pubchan(stream)
+	ch <- data
+	return nil
+}
+
+func (r *pubsubRecorder) Subscribe(stream, group string, h PubSubHandler) error {
+	r.subMtx.Lock()
+	defer r.subMtx.Unlock()
 
 	if _, has := r.subs[stream]; has {
 		return errorString("already subscribed")
@@ -225,9 +201,21 @@ func (r *subscriptionRecorder) Subscribe(stream, group string, h PubSubHandler) 
 	return nil
 }
 
-func (r *subscriptionRecorder) Unsubscribe(stream string) error {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
+func (r *pubsubRecorder) pubchan(stream string) chan message {
+	r.pubMtx.Lock()
+	defer r.pubMtx.Unlock()
+
+	ch, has := r.pubs[stream]
+	if !has {
+		ch = make(chan message)
+		r.pubs[stream] = ch
+	}
+	return ch
+}
+
+func (r *pubsubRecorder) Unsubscribe(stream string) error {
+	r.subMtx.Lock()
+	defer r.subMtx.Unlock()
 
 	if _, has := r.subs[stream]; !has {
 		return errorString("not subscribed")
@@ -236,14 +224,24 @@ func (r *subscriptionRecorder) Unsubscribe(stream string) error {
 	return nil
 }
 
-func (r *subscriptionRecorder) get(stream string) *subscription {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
+func (r *pubsubRecorder) sub(stream string) *subscription {
+	r.subMtx.Lock()
+	defer r.subMtx.Unlock()
 	return r.subs[stream]
 }
 
-func (r *subscriptionRecorder) countSubs() int {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
+func (r *pubsubRecorder) countSubs() int {
+	r.subMtx.Lock()
+	defer r.subMtx.Unlock()
 	return len(r.subs)
+}
+
+func (r *pubsubRecorder) clear() {
+	r.pubMtx.Lock()
+	r.pubs = map[string]chan message{}
+	r.pubMtx.Unlock()
+
+	r.subMtx.Lock()
+	r.subs = map[string]*subscription{}
+	r.subMtx.Unlock()
 }

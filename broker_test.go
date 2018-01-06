@@ -9,8 +9,7 @@ import (
 )
 
 func TestNewBroker(t *testing.T) {
-	pub := newPublishRecorder()
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 
 	var (
 		b   *Broker
@@ -21,13 +20,11 @@ func TestNewBroker(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b, err = NewBroker(pub, sub,
-			Group("group"),
-		)
+		b, err = NewBroker(rec, Group("group"))
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-pub.channel("group")
+		msg = <-rec.pubchan("group")
 	}()
 	wg.Wait()
 
@@ -59,7 +56,7 @@ func TestNewBroker(t *testing.T) {
 		defer wg.Done()
 		err = b.Close()
 	}()
-	msg = <-pub.channel("group")
+	msg = <-rec.pubchan("group")
 	wg.Wait()
 
 	switch {
@@ -71,15 +68,14 @@ func TestNewBroker(t *testing.T) {
 }
 
 func TestBrokerPublish(t *testing.T) {
-	pub := newPublishRecorder()
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	store := newStoreRecorder()
 
 	opts := defaultOptions()
 	opts.store = store
 
 	b := &Broker{
-		pubsub: newPubSub(pub, sub, opts),
+		pubsub: newPubSub(rec, opts),
 		repo:   newRepository(opts),
 	}
 
@@ -103,7 +99,7 @@ func TestBrokerPublish(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		published = <-pub.channel(msg.Stream)
+		published = <-rec.pubchan(msg.Stream)
 	}()
 	wg.Wait()
 
@@ -142,10 +138,9 @@ func TestBrokerPublishWithValidationErrors(t *testing.T) {
 }
 
 func TestBrokerSubscribe(t *testing.T) {
-	pub := newPublishRecorder()
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	b := &Broker{
-		pubsub:   newPubSub(pub, sub, defaultOptions()),
+		pubsub:   newPubSub(rec, defaultOptions()),
 		handlers: make(map[string][]Handler),
 	}
 
@@ -159,7 +154,7 @@ func TestBrokerSubscribe(t *testing.T) {
 		t.Fatalf("unexpected number of subscribed handlers: %d", len(b.handlers["stream"]))
 	}
 
-	s := sub.get("stream")
+	s := rec.sub("stream")
 	switch {
 	case s == nil:
 		t.Fatal("no subscription")
@@ -178,7 +173,7 @@ func TestBrokerSubscribe(t *testing.T) {
 		t.Fatalf("unexpected number of subscribed handlers: %d", len(b.handlers["stream"]))
 	}
 
-	s = sub.get("stream")
+	s = rec.sub("stream")
 	switch {
 	case s == nil:
 		t.Fatal("no subscription")
@@ -193,11 +188,10 @@ func TestBrokerHandleJoin(t *testing.T) {
 	opts.nodeKey = keys.at(0)
 	opts.groupName = "group"
 
-	pub := newPublishRecorder()
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	b := &Broker{
 		routing: newRoutingTable(opts),
-		pubsub:  newPubSub(pub, sub, opts),
+		pubsub:  newPubSub(rec, opts),
 	}
 
 	join := joinMsg{
@@ -215,7 +209,7 @@ func TestBrokerHandleJoin(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-pub.channel("group.0000000000000000000000000000000000000002")
+		msg = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 	}()
 	wg.Wait()
 
@@ -290,10 +284,9 @@ func TestBrokerHandlePing(t *testing.T) {
 	opts.nodeKey = keys.at(0)
 	opts.groupName = "group"
 
-	pub := newPublishRecorder()
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	b := &Broker{
-		pubsub: newPubSub(pub, sub, opts),
+		pubsub: newPubSub(rec, opts),
 	}
 
 	ping := pingMsg{
@@ -312,7 +305,7 @@ func TestBrokerHandlePing(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-pub.channel("group.0000000000000000000000000000000000000002")
+		msg = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 	}()
 	wg.Wait()
 
@@ -348,11 +341,10 @@ func TestBrokerHandleFwd(t *testing.T) {
 
 	handlerCalled := false
 
-	pub := newPublishRecorder()
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	b := &Broker{
 		routing: newRoutingTable(opts),
-		pubsub:  newPubSub(pub, sub, opts),
+		pubsub:  newPubSub(rec, opts),
 		handlers: map[string][]Handler{
 			fwd.stream: {
 				func(msg *Message) {
@@ -385,7 +377,7 @@ func TestBrokerHandleFwd(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-pub.channel("group.0000000000000000000000000000000000000002")
+		msg = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 	}()
 	wg.Wait()
 
@@ -407,7 +399,7 @@ func TestBrokerHandleFwd(t *testing.T) {
 	}
 
 	// forward again
-	pub.clear()
+	rec.clear()
 	handlerCalled = false
 	fwdmsg := fwd.marshal(nil)
 	b.routing.register(keys)
@@ -419,7 +411,7 @@ func TestBrokerHandleFwd(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-pub.channel("group.0000000000000000000000000000000000000003")
+		msg = <-rec.pubchan("group.0000000000000000000000000000000000000003")
 	}()
 	wg.Wait()
 
@@ -477,7 +469,7 @@ func TestBrokerProcessSub(t *testing.T) {
 		time:    time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 		payload: []byte("payload"),
 	}
-	pkey := DataKey(pubmsg.partitionKey)
+	pkey := BytesKey(pubmsg.partitionKey)
 	local := pkey
 	local[0]++
 
@@ -485,11 +477,10 @@ func TestBrokerProcessSub(t *testing.T) {
 	opts.nodeKey = local[:]
 	opts.groupName = "group"
 
-	pub := newPublishRecorder()
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	b := &Broker{
 		routing: newRoutingTable(opts),
-		pubsub:  newPubSub(pub, sub, opts),
+		pubsub:  newPubSub(rec, opts),
 		handlers: map[string][]Handler{
 			"stream": {
 				func(msg *Message) {
@@ -540,7 +531,7 @@ func TestBrokerProcessSub(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg := <-pub.channel("group." + key(pkey[:]).String())
+		msg := <-rec.pubchan("group." + key(pkey[:]).String())
 		if msg.typ() != msgTypeFwd {
 			t.Fatalf("unexpected message type: %s", msg.typ())
 		}
@@ -574,7 +565,7 @@ func TestBrokerProcessSub(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-pub.channel("group." + key(pkey[:]).String())
+		msg = <-rec.pubchan("group." + key(pkey[:]).String())
 	}()
 	wg.Wait()
 
@@ -601,12 +592,11 @@ func TestBrokerStabilize(t *testing.T) {
 	opts.groupName = "group"
 	opts.nodeKey = keys.at(0)
 
-	pub := newPublishRecorder()
-	sub := newSubscriptionRecorder()
+	rec := newPubsubRecorder()
 	b := &Broker{
 		ackTimeout:  time.Second,
 		routing:     newRoutingTable(opts),
-		pubsub:      newPubSub(pub, sub, opts),
+		pubsub:      newPubSub(rec, opts),
 		closed:      make(chan struct{}),
 		pendingMsgs: make(map[uint64]pendingMsg),
 	}
@@ -625,7 +615,7 @@ func TestBrokerStabilize(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < len(msgs); i++ {
-			msgs[i] = <-pub.channel("group.0000000000000000000000000000000000000002")
+			msgs[i] = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 		}
 		close(b.closed)
 	}()

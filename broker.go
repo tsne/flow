@@ -46,7 +46,7 @@ type Broker struct {
 
 // NewBroker creates a new broker which uses the publisher and subscriber
 // for publishing messages and subscribing to streams respectively.
-func NewBroker(pub Publisher, sub Subscriber, o ...Option) (*Broker, error) {
+func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 	opts := defaultOptions()
 	if err := opts.apply(o...); err != nil {
 		return nil, err
@@ -55,7 +55,7 @@ func NewBroker(pub Publisher, sub Subscriber, o ...Option) (*Broker, error) {
 	b := &Broker{
 		ackTimeout:  opts.ackTimeout,
 		routing:     newRoutingTable(opts),
-		pubsub:      newPubSub(pub, sub, opts),
+		pubsub:      newPubSub(pubsub, opts),
 		repo:        newRepository(opts),
 		closed:      make(chan struct{}),
 		pendingMsgs: make(map[uint64]pendingMsg),
@@ -91,13 +91,11 @@ func (b *Broker) Close() error {
 }
 
 // Publish persists the message and publishes it to the pub/sub system.
-// If the message has no partition key, the source will be used instead.
+// If the message has no partition key, the message will be processed
+// by a random broker within the group.
 func (b *Broker) Publish(msg Message) error {
 	if msg.Stream == "" {
 		return errorString("missing message stream")
-	}
-	if len(msg.PartitionKey) == 0 {
-		msg.PartitionKey = msg.Source
 	}
 
 	if err := b.repo.persist(msg); err != nil {
@@ -179,7 +177,7 @@ func (b *Broker) processSub(stream string, data []byte) {
 		fwdmsg message
 		mid    uint64
 	)
-	key := DataKey(pub.partitionKey)
+	key := BytesKey(pub.partitionKey)
 	for {
 		succ := b.routing.successor(key[:])
 		if len(succ) == 0 {

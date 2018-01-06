@@ -12,9 +12,14 @@ const KeySize = sha1.Size
 // Key represents a key within a group. A key is used for partitioning.
 type Key [KeySize]byte
 
-// DataKey returns a key for the given data.
-func DataKey(data []byte) Key {
-	return Key(sha1.Sum(data))
+// BytesKey returns a key for the given bytes.
+func BytesKey(p []byte) Key {
+	return Key(sha1.Sum(p))
+}
+
+// StringKey returns a key for the given string.
+func StringKey(s string) Key {
+	return BytesKey([]byte(s))
 }
 
 // String returns a string representation of the key.
