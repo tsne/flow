@@ -85,8 +85,10 @@ func (m *joinMsg) marshal(msg message) message {
 }
 
 func (m *joinMsg) unmarshal(msg message) (err error) {
-	m.sender, err = keyFromBytes(msg.payload())
-	return
+	if m.sender, err = keyFromBytes(msg.payload()); err != nil {
+		return errMalformedJoinMsg
+	}
+	return nil
 }
 
 // leave
@@ -101,8 +103,10 @@ func (m *leaveMsg) marshal(msg message) message {
 }
 
 func (m *leaveMsg) unmarshal(msg message) (err error) {
-	m.node, err = keyFromBytes(msg.payload())
-	return
+	if m.node, err = keyFromBytes(msg.payload()); err != nil {
+		return errMalformedLeaveMsg
+	}
+	return nil
 }
 
 // info
@@ -119,14 +123,18 @@ func (m *infoMsg) marshal(msg message) message {
 	return msg
 }
 
-func (m *infoMsg) unmarshal(msg message) (err error) {
+func (m *infoMsg) unmarshal(msg message) error {
 	p := msg.payload()
 	if len(p) < 8 {
-		return protocolError("invalid info message")
+		return errMalformedInfoMsg
 	}
+
+	var err error
 	m.id = binary.BigEndian.Uint64(p)
-	m.neighbors, err = keysFromBytes(p[8:])
-	return err
+	if m.neighbors, err = keysFromBytes(p[8:]); err != nil {
+		return errMalformedInfoMsg
+	}
+	return nil
 }
 
 // ping
@@ -146,13 +154,15 @@ func (m *pingMsg) marshal(msg message) message {
 func (m *pingMsg) unmarshal(msg message) error {
 	p := msg.payload()
 	if len(p) < 8+KeySize {
-		return protocolError("invalid ping message")
+		return errMalformedPingMsg
 	}
 
 	var err error
 	m.id = binary.BigEndian.Uint64(p)
-	m.sender, err = keyFromBytes(p[8:])
-	return err
+	if m.sender, err = keyFromBytes(p[8:]); err != nil {
+		return errMalformedPingMsg
+	}
+	return nil
 }
 
 // ack
@@ -176,8 +186,9 @@ func (m *ackMsg) marshal(msg message) message {
 func (m *ackMsg) unmarshal(msg message) error {
 	p := msg.payload()
 	if len(p) < 8 {
-		return protocolError("invalid ack message")
+		return errMalformedAckMsg
 	}
+
 	m.id = binary.BigEndian.Uint64(p)
 	if perr := p[8:]; len(perr) == 0 {
 		m.err = nil
@@ -211,8 +222,9 @@ func (m *pubMsg) marshalInto(p []byte) {
 
 func (m *pubMsg) unmarshalFrom(p []byte) error {
 	if len(p) < 20 {
-		return protocolError("invalid pub message")
+		return errMalformedPubMsg
 	}
+
 	sourceLen := binary.BigEndian.Uint32(p)
 	pkeyLen := binary.BigEndian.Uint32(p[16+sourceLen:])
 	secs := int64(binary.BigEndian.Uint64(p[4+sourceLen:]))
@@ -259,8 +271,9 @@ func (m *fwdMsg) marshal(msg message) message {
 func (m *fwdMsg) unmarshal(msg message) error {
 	p := msg.payload()
 	if len(p) < 12+2*KeySize {
-		return protocolError("invalid fwd message")
+		return errMalformedFwdMsg
 	}
+
 	streamLen := binary.BigEndian.Uint32(p[8+2*KeySize:])
 
 	m.id = binary.BigEndian.Uint64(p)
@@ -268,7 +281,7 @@ func (m *fwdMsg) unmarshal(msg message) error {
 	m.key = p[8+KeySize : 8+2*KeySize]
 	m.stream = string(p[12+2*KeySize : 12+2*KeySize+streamLen])
 	if err := m.pubMsg.unmarshalFrom(p[12+2*KeySize+streamLen:]); err != nil {
-		return protocolError("invalid fwd message")
+		return errMalformedFwdMsg
 	}
 	return nil
 }

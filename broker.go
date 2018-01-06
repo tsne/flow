@@ -24,8 +24,10 @@ type pendingMsg struct {
 	errch    chan error
 }
 
-// Broker enables the publishing and subscribing capabilities by connecting
-// the pub/sub system with the storage.
+// Broker represents a single node within a group. It enables
+// the publishing and subscribing capabilities of the pub/sub
+// system. Each subscribed message is handled by the responsible
+// broker, which is determined by the respective node key.
 type Broker struct {
 	ackTimeout time.Duration
 
@@ -44,8 +46,12 @@ type Broker struct {
 	handlers    map[string][]Handler // stream => handlers
 }
 
-// NewBroker creates a new broker which uses the publisher and subscriber
-// for publishing messages and subscribing to streams respectively.
+// NewBroker creates a new broker which uses the pub/sub system
+// for publishing messages and subscribing to streams.
+//
+// Because the PubSub interface does not contain a close operation,
+// the caller of this function is responsible for closing all
+// connections to the pub/sub system.
 func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 	opts := defaultOptions()
 	if err := opts.apply(o...); err != nil {
@@ -77,8 +83,8 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 	return b, nil
 }
 
-// Close closes the connections to the pub/sub system and
-// notifies all group members about a leaving node.
+// Close notifies all group members about a leaving broker and
+// diconnects from the pub/sub system.
 func (b *Broker) Close() error {
 	close(b.closed)
 
@@ -111,8 +117,9 @@ func (b *Broker) Publish(msg Message) error {
 	return b.pubsub.publish(msg.Stream, pub.marshal(nil))
 }
 
-// Subscribe subscribes to the messages of a specific stream. These messsages
-// a partitioned within the group the broker is assigned to.
+// Subscribe subscribes to the messages of the specified stream.
+// These messsages are partitioned within the group the broker is
+// assigned to.
 func (b *Broker) Subscribe(stream string, handler Handler) error {
 	b.handlersMtx.Lock()
 	handlers, has := b.handlers[stream]

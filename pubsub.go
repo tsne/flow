@@ -22,12 +22,6 @@ type PubSub interface {
 	Unsubscribe(stream string) error
 }
 
-//
-// The subscriber has to support grouping, where only one
-// subscribed handler is called within a single group.
-type Subscriber interface {
-}
-
 type pubsub struct {
 	PubSub
 	groupStream string

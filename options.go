@@ -55,7 +55,8 @@ func (o *options) apply(opts ...Option) (err error) {
 }
 
 // Group assigns the broker to a group with the given name.
-// If no group is set, a default group will be used instead.
+// If no group is assigned to a broker, a global default group
+// will be used instead.
 func Group(name string) Option {
 	return func(o *options) error {
 		if name == "" {
@@ -67,8 +68,8 @@ func Group(name string) Option {
 }
 
 // NodeKey assigns a key to the broker. This key is used for
-// message partition and should therefore be unique within the
-// assigned group.
+// message partitioning and should therefore be unique within
+// the assigned group.
 func NodeKey(k Key) Option {
 	return func(o *options) error {
 		if len(o.nodeKey) != len(k) {
@@ -79,7 +80,7 @@ func NodeKey(k Key) Option {
 	}
 }
 
-// Storage assignes a storage system to the broker. Each published
+// Storage assigns a storage system to the broker. Each published
 // message of this broker is stored using s as the storage engine.
 func Storage(s Store) Option {
 	return func(o *options) error {
@@ -140,7 +141,8 @@ func StabilizationInterval(d time.Duration) Option {
 	}
 }
 
-// AckTimeout defines the timeout for acknowledging a forwarded message.
+// AckTimeout defines the timeout for acknowledging an internally
+// forwarded message.
 func AckTimeout(d time.Duration) Option {
 	return func(o *options) error {
 		if d <= 0 {

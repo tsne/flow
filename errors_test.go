@@ -18,7 +18,7 @@ func TestOptionError(t *testing.T) {
 
 func TestProtocolError(t *testing.T) {
 	err := protocolError("error text")
-	if err.Error() != "error text" {
+	if err.Error() != "protocol error: error text" {
 		t.Fatalf("unexpected error message: %s", err.Error())
 	}
 }
