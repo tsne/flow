@@ -6,23 +6,23 @@ import (
 	"time"
 )
 
-func TestNewRepository(t *testing.T) {
+func TestNewStorage(t *testing.T) {
 	store := newStoreRecorder()
-	repo := newRepository(options{
+	storage := newStorage(options{
 		store:       store,
 		storeFilter: func(string) bool { return false },
 	})
-	if s, ok := repo.store.(*storeRecorder); !ok || s != store {
-		t.Fatalf("unexpected persistence store: %T", repo.store)
+	if s, ok := storage.store.(*storeRecorder); !ok || s != store {
+		t.Fatalf("unexpected persistence store: %T", storage.store)
 	}
-	if repo.filter == nil {
+	if storage.filter == nil {
 		t.Fatal("expected filter to be set")
 	}
 }
 
-func TestRepositoryPersist(t *testing.T) {
+func TestStoragePersist(t *testing.T) {
 	store := newStoreRecorder()
-	repo := repository{
+	storage := storage{
 		store:  store,
 		filter: func(stream string) bool { return stream != "ignore" },
 	}
@@ -35,7 +35,7 @@ func TestRepositoryPersist(t *testing.T) {
 		Data:         []byte("data"),
 	}
 
-	err := repo.persist(msg)
+	err := storage.persist(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -44,7 +44,7 @@ func TestRepositoryPersist(t *testing.T) {
 	}
 
 	msg.Stream = "stream"
-	err = repo.persist(msg)
+	err = storage.persist(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -53,4 +53,25 @@ func TestRepositoryPersist(t *testing.T) {
 	case !reflect.DeepEqual(*store.message(0), msg):
 		t.Fatalf("unexpected message: %+v", store.message(0))
 	}
+}
+
+type storeRecorder struct {
+	messages []Message
+}
+
+func newStoreRecorder() *storeRecorder {
+	return &storeRecorder{}
+}
+
+func (r *storeRecorder) Store(msg *Message) error {
+	r.messages = append(r.messages, *msg)
+	return nil
+}
+
+func (r *storeRecorder) countMessages() int {
+	return len(r.messages)
+}
+
+func (r *storeRecorder) message(idx int) *Message {
+	return &r.messages[idx]
 }

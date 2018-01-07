@@ -18,7 +18,7 @@ type Message struct {
 // Handler represents a callback function for handling incoming messages.
 type Handler func(msg *Message)
 
-type pendingMsg struct {
+type pendingResp struct {
 	receiver key
 	timer    *time.Timer
 	errch    chan error
@@ -33,14 +33,14 @@ type Broker struct {
 
 	routing routingTable
 	pubsub  pubsub
-	repo    repository
-	msgID   uint64
+	storage storage
+	respID  uint64
 
 	wg     sync.WaitGroup
 	closed chan struct{}
 
-	pendingMtx  sync.Mutex
-	pendingMsgs map[uint64]pendingMsg // id => pending message
+	pendingMtx   sync.Mutex
+	pendingResps map[uint64]pendingResp // id => pending response
 
 	handlersMtx sync.RWMutex
 	handlers    map[string][]Handler // stream => handlers
@@ -59,13 +59,13 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 	}
 
 	b := &Broker{
-		ackTimeout:  opts.ackTimeout,
-		routing:     newRoutingTable(opts),
-		pubsub:      newPubSub(pubsub, opts),
-		repo:        newRepository(opts),
-		closed:      make(chan struct{}),
-		pendingMsgs: make(map[uint64]pendingMsg),
-		handlers:    make(map[string][]Handler),
+		ackTimeout:   opts.ackTimeout,
+		routing:      newRoutingTable(opts),
+		pubsub:       newPubSub(pubsub, opts),
+		storage:      newStorage(opts),
+		closed:       make(chan struct{}),
+		pendingResps: make(map[uint64]pendingResp),
+		handlers:     make(map[string][]Handler),
 	}
 
 	err := b.pubsub.subscribeGroup(b.processGroupSubs)
@@ -104,7 +104,7 @@ func (b *Broker) Publish(msg Message) error {
 		return errorString("missing message stream")
 	}
 
-	if err := b.repo.persist(msg); err != nil {
+	if err := b.storage.persist(msg); err != nil {
 		return err
 	}
 
@@ -180,11 +180,13 @@ func (b *Broker) processSub(stream string, data []byte) {
 		return
 	}
 
-	var (
-		fwdmsg message
-		mid    uint64
-	)
 	key := BytesKey(pub.partitionKey)
+
+	var (
+		rid    uint64
+		fwdmsg message
+		errch  chan error
+	)
 	for {
 		succ := b.routing.successor(key[:])
 		if len(succ) == 0 {
@@ -199,25 +201,25 @@ func (b *Broker) processSub(stream string, data []byte) {
 		}
 
 		if len(fwdmsg) == 0 {
-			mid = b.nextMsgID()
+			rid = b.nextRespID()
 			fwd := fwdMsg{
-				id:     mid,
+				id:     rid,
 				origin: b.routing.local,
 				key:    key[:],
 				stream: stream,
 				pubMsg: pub,
 			}
 			fwdmsg = fwd.marshal(nil)
+			errch = make(chan error)
 		}
 
-		errch := make(chan error)
-		b.addPendingMsg(succ, mid, errch)
+		b.awaitResp(succ, rid, errch)
 		b.pubsub.sendToNode(succ, fwdmsg)
 		if err := <-errch; err != nil {
-			if err == errTimeout {
-				// The node was suspected and removed from
-				// the valid keys. We look for the next
-				// successor to handle the message.
+			if err == errRespTimeout {
+				// The node was suspected and removed from the
+				// valid keys. We look for the next successor
+				// to handle the message.
 				continue
 			}
 			logf("subscription error: %v", err)
@@ -258,7 +260,7 @@ func (b *Broker) handleInfo(msg message) {
 		return
 	}
 
-	b.removePendingMsg(info.id, nil)
+	b.notifyResp(info.id, nil)
 	b.routing.register(info.neighbors)
 }
 
@@ -308,7 +310,7 @@ func (b *Broker) handleAck(msg message) {
 		logf("ack unmarshal error: %v", err)
 		return
 	}
-	b.removePendingMsg(ack.id, ack.err)
+	b.notifyResp(ack.id, ack.err)
 }
 
 func (b *Broker) dispatch(msg Message) {
@@ -320,37 +322,37 @@ func (b *Broker) dispatch(msg Message) {
 	}
 }
 
-func (b *Broker) addPendingMsg(receiver key, mid uint64, errch chan error) {
+func (b *Broker) awaitResp(receiver key, rid uint64, errch chan error) {
 	b.pendingMtx.Lock()
-	b.pendingMsgs[mid] = pendingMsg{
+	b.pendingResps[rid] = pendingResp{
 		receiver: receiver,
 		errch:    errch,
 		timer: time.AfterFunc(b.ackTimeout, func() {
-			if receiver := b.removePendingMsg(mid, errTimeout); len(receiver) != 0 {
-				b.routing.suspect(receiver)
-			}
+			b.notifyResp(rid, errRespTimeout)
 		}),
 	}
 	b.pendingMtx.Unlock()
 }
 
-func (b *Broker) removePendingMsg(mid uint64, err error) key {
+func (b *Broker) notifyResp(rid uint64, err error) {
 	b.pendingMtx.Lock()
-	m, has := b.pendingMsgs[mid]
-	delete(b.pendingMsgs, mid)
+	resp, has := b.pendingResps[rid]
+	delete(b.pendingResps, rid)
 	b.pendingMtx.Unlock()
 	if !has {
-		return nil
+		return
 	}
-	m.timer.Stop()
-	if m.errch != nil {
-		m.errch <- err
+	resp.timer.Stop()
+	if err == errRespTimeout {
+		b.routing.suspect(resp.receiver)
 	}
-	return m.receiver
+	if resp.errch != nil {
+		resp.errch <- err
+	}
 }
 
-func (b *Broker) nextMsgID() uint64 {
-	return atomic.AddUint64(&b.msgID, 1)
+func (b *Broker) nextRespID() uint64 {
+	return atomic.AddUint64(&b.respID, 1)
 }
 
 func (b *Broker) stabilize(interval time.Duration) {
@@ -371,10 +373,10 @@ func (b *Broker) stabilize(interval time.Duration) {
 		ping := pingMsg{sender: b.routing.local}
 		for i, n := 0, stabs.length(); i < n; i++ {
 			key := stabs.at(i)
-			ping.id = b.nextMsgID()
+			ping.id = b.nextRespID()
 			msg = ping.marshal(msg)
 			if b.pubsub.sendToNode(key, msg) == nil {
-				b.addPendingMsg(key, ping.id, nil)
+				b.awaitResp(key, ping.id, nil)
 			}
 		}
 	}

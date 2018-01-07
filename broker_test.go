@@ -33,14 +33,14 @@ func TestNewBroker(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	case b.ackTimeout <= 0:
 		t.Fatalf("unexpected ack timeout: %v", b.ackTimeout)
-	case b.msgID != 0:
-		t.Fatalf("unexpected message id: %d", b.msgID)
+	case b.respID != 0:
+		t.Fatalf("unexpected message id: %d", b.respID)
 	case b.closed == nil:
 		t.Fatal("no closed channel")
-	case b.pendingMsgs == nil:
-		t.Fatal("no closed pending message map")
-	case len(b.pendingMsgs) != 0:
-		t.Fatalf("unexpected number of pending messages: %d", len(b.pendingMsgs))
+	case b.pendingResps == nil:
+		t.Fatal("no closed pending response map")
+	case len(b.pendingResps) != 0:
+		t.Fatalf("unexpected number of pending responses: %d", len(b.pendingResps))
 	case b.handlers == nil:
 		t.Fatal("no handler map")
 	case len(b.handlers) != 0:
@@ -75,8 +75,8 @@ func TestBrokerPublish(t *testing.T) {
 	opts.store = store
 
 	b := &Broker{
-		pubsub: newPubSub(rec, opts),
-		repo:   newRepository(opts),
+		pubsub:  newPubSub(rec, opts),
+		storage: newStorage(opts),
 	}
 
 	msg := Message{
@@ -257,8 +257,8 @@ func TestBrokerHandleInfo(t *testing.T) {
 
 	b := &Broker{
 		routing: newRoutingTable(opts),
-		pendingMsgs: map[uint64]pendingMsg{
-			1: {timer: time.AfterFunc(time.Second, func() { t.Fatalf("message timeout") })},
+		pendingResps: map[uint64]pendingResp{
+			1: {timer: time.AfterFunc(time.Second, func() { t.Fatalf("response timeout") })},
 		},
 	}
 
@@ -269,8 +269,8 @@ func TestBrokerHandleInfo(t *testing.T) {
 	b.processGroupSubs("stream", info.marshal(nil))
 
 	switch {
-	case len(b.pendingMsgs) != 0:
-		t.Fatalf("unexpected number of pending messages: %d", len(b.pendingMsgs))
+	case len(b.pendingResps) != 0:
+		t.Fatalf("unexpected number of pending responses: %d", len(b.pendingResps))
 	case b.routing.keys.length() != 1:
 		t.Fatalf("unexpected number of keys: %d", b.routing.keys.length())
 	case !b.routing.keys.at(0).equal(keys.at(1)):
@@ -426,9 +426,9 @@ func TestBrokerHandleFwd(t *testing.T) {
 func TestBrokerHandleAck(t *testing.T) {
 	errch := make(chan error)
 	b := &Broker{
-		pendingMsgs: map[uint64]pendingMsg{
+		pendingResps: map[uint64]pendingResp{
 			7: {
-				timer: time.AfterFunc(time.Second, func() { t.Fatalf("message timeout") }),
+				timer: time.AfterFunc(time.Second, func() { t.Fatalf("response timeout") }),
 				errch: errch,
 			},
 		},
@@ -457,8 +457,8 @@ func TestBrokerHandleAck(t *testing.T) {
 	switch {
 	case err != ack.err:
 		t.Fatalf("unexpected ack error: %v", err)
-	case len(b.pendingMsgs) != 0:
-		t.Fatalf("unexpected number of pending messages: %d", len(b.pendingMsgs))
+	case len(b.pendingResps) != 0:
+		t.Fatalf("unexpected number of pending responses: %d", len(b.pendingResps))
 	}
 }
 
@@ -469,7 +469,7 @@ func TestBrokerProcessSub(t *testing.T) {
 		time:    time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 		payload: []byte("payload"),
 	}
-	pkey := BytesKey(pubmsg.partitionKey)
+	pkey := StringKey("partition key")
 	local := pkey
 	local[0]++
 
@@ -500,7 +500,7 @@ func TestBrokerProcessSub(t *testing.T) {
 				},
 			},
 		},
-		pendingMsgs: map[uint64]pendingMsg{},
+		pendingResps: map[uint64]pendingResp{},
 	}
 
 	// local dispatch without partition key
@@ -594,11 +594,11 @@ func TestBrokerStabilize(t *testing.T) {
 
 	rec := newPubsubRecorder()
 	b := &Broker{
-		ackTimeout:  time.Second,
-		routing:     newRoutingTable(opts),
-		pubsub:      newPubSub(rec, opts),
-		closed:      make(chan struct{}),
-		pendingMsgs: make(map[uint64]pendingMsg),
+		ackTimeout:   time.Second,
+		routing:      newRoutingTable(opts),
+		pubsub:       newPubSub(rec, opts),
+		closed:       make(chan struct{}),
+		pendingResps: make(map[uint64]pendingResp),
 	}
 	b.routing.register(keys)
 	b.wg.Add(1)

@@ -1,7 +1,7 @@
 package flow
 
 const (
-	errTimeout       = errorString("timeout")
+	errRespTimeout   = errorString("response timeout")
 	errMalformedKey  = errorString("malformed key")
 	errMalformedKeys = errorString("malformed keys")
 

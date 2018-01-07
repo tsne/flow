@@ -182,8 +182,7 @@ func newPubsubRecorder() *pubsubRecorder {
 }
 
 func (r *pubsubRecorder) Publish(stream string, data []byte) error {
-	ch := r.pubchan(stream)
-	ch <- data
+	r.pubchan(stream) <- data
 	return nil
 }
 
