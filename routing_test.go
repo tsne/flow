@@ -158,7 +158,7 @@ func TestRoutingTableNeighbors(t *testing.T) {
 		local:          key7,
 		successorCount: 2,
 	}
-	neighbors := r.neighbors()
+	neighbors := r.neighbors(nil)
 	switch {
 	case neighbors.length() != 1:
 		t.Fatalf("unexpected number of neighbors: %d", neighbors.length())
@@ -167,7 +167,7 @@ func TestRoutingTableNeighbors(t *testing.T) {
 	}
 
 	r.register(keys(key3))
-	neighbors = r.neighbors()
+	neighbors = r.neighbors(neighbors)
 	switch {
 	case neighbors.length() != 2:
 		t.Fatalf("unexpected number of neighbors: %d", neighbors.length())
@@ -176,7 +176,7 @@ func TestRoutingTableNeighbors(t *testing.T) {
 	}
 
 	r.register(keybuf)
-	neighbors = r.neighbors()
+	neighbors = r.neighbors(neighbors)
 	switch {
 	case neighbors.length() != 4:
 		t.Fatalf("unexpected number of neighbors: %d", neighbors.length())
@@ -192,7 +192,7 @@ func TestRoutingTableStabilizers(t *testing.T) {
 		stabilizerCount: 5,
 	}
 
-	stabilizers := r.stabilizers()
+	stabilizers := r.stabilizers(nil)
 	switch {
 	case stabilizers.length() != 1:
 		t.Fatalf("unexpected number of stabilizers: %d", stabilizers.length())
@@ -205,7 +205,7 @@ func TestRoutingTableStabilizers(t *testing.T) {
 		stabilizerCount: 2,
 	}
 
-	stabilizers = r.stabilizers()
+	stabilizers = r.stabilizers(stabilizers)
 	switch {
 	case stabilizers.length() != 3:
 		t.Fatalf("unexpected number of stabilizers: %d", stabilizers.length())
@@ -215,7 +215,7 @@ func TestRoutingTableStabilizers(t *testing.T) {
 		t.Fatalf("unexpected stabilizer index: %d", r.stabIdx)
 	}
 
-	stabilizers = r.stabilizers()
+	stabilizers = r.stabilizers(stabilizers)
 	switch {
 	case stabilizers.length() != 3:
 		t.Fatalf("unexpected number of stabilizers: %d", stabilizers.length())
@@ -230,7 +230,7 @@ func TestRoutingTableSuccessor(t *testing.T) {
 	key5 := intKey(5)
 
 	r := routingTable{}
-	succ := r.successor(key5)
+	succ := r.successor(key5, nil)
 	if len(succ) != 0 {
 		t.Fatalf("unexpected successor: %s", succ.String())
 	}
@@ -239,7 +239,7 @@ func TestRoutingTableSuccessor(t *testing.T) {
 		local: key5,
 		keys:  ring(intKeys(1, 3, 7, 9)),
 	}
-	succ = r.successor(r.keys.at(0))
+	succ = r.successor(r.keys.at(0), succ)
 	switch {
 	case len(succ) == 0:
 		t.Fatal("non-local successor expected")

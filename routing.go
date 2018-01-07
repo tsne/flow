@@ -50,55 +50,53 @@ func (r *routingTable) suspect(k key) {
 }
 
 // returns predecessor + successors + local
-func (r *routingTable) neighbors() keys {
+func (r *routingTable) neighbors(buf keys) keys {
 	neighborCount := r.successorCount + 1
 
-	var (
-		res  keys
-		size int
-	)
+	var size int
 	r.mtx.RLock()
 	if nkeys := r.keys.length(); neighborCount > nkeys {
-		res = makeKeys(nkeys + 1)
-		size = copy(res, r.keys)
+		buf = makeKeys(nkeys+1, buf)
+		size = copy(buf, r.keys)
 	} else {
 		idx := r.succIdx - 1
 		if idx < 0 {
 			idx = nkeys - 1
 		}
-		res = makeKeys(neighborCount + 1)
-		p := res.slice(0, neighborCount)
+		buf = makeKeys(neighborCount+1, buf)
+		p := buf.slice(0, neighborCount)
 		size = copy(p, r.keys.slice(idx, nkeys))
 		size += copy(p[size:], r.keys)
 	}
 	r.mtx.RUnlock()
 
-	copy(res[size:], r.local)
-	return res
+	copy(buf[size:], r.local)
+	return buf
 }
 
 // returns succcessor and stabilizers
-func (r *routingTable) stabilizers() keys {
+func (r *routingTable) stabilizers(buf keys) keys {
 	stabilizerCount := 1 + r.stabilizerCount
 
-	var res keys
 	r.mtx.RLock()
 	if nkeys := r.keys.length(); stabilizerCount > nkeys {
-		res = makeKeys(nkeys)
-		copy(res, r.keys)
+		buf = makeKeys(nkeys, buf)
+		copy(buf, r.keys)
 	} else {
-		res = makeKeys(stabilizerCount)
-		copy(res, r.keys.at(r.succIdx))
-		n := copy(res[KeySize:], r.keys.slice(r.stabIdx, nkeys))
-		copy(res[KeySize+n:], r.keys)
+		buf = makeKeys(stabilizerCount, buf)
+		copy(buf, r.keys.at(r.succIdx))
+		n := copy(buf[KeySize:], r.keys.slice(r.stabIdx, nkeys))
+		copy(buf[KeySize+n:], r.keys)
 		r.stabIdx = (r.stabIdx + r.stabilizerCount) % nkeys
 	}
 
 	r.mtx.RUnlock()
-	return res
+	return buf
 }
 
-func (r *routingTable) successor(k key) (succ key) {
+func (r *routingTable) successor(k key, buf key) key {
+	buf = buf[:0]
+
 	r.mtx.RLock()
 	if idx := r.keys.successor(k); idx >= 0 {
 		prevIdx := idx - 1
@@ -109,11 +107,11 @@ func (r *routingTable) successor(k key) (succ key) {
 		curr := r.keys.at(idx)
 		prev := r.keys.at(prevIdx)
 		if (prevIdx != idx && !r.local.between(prev, curr)) || !k.between(prev, r.local) {
-			succ = curr.clone()
+			buf = curr.clone(buf)
 		}
 	}
 	r.mtx.RUnlock()
-	return
+	return buf
 }
 
 // The following functions have unprotected access.

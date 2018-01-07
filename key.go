@@ -53,10 +53,12 @@ func (k key) array() [KeySize]byte {
 	return res
 }
 
-func (k key) clone() key {
-	res := make(key, KeySize)
-	copy(res, k)
-	return res
+func (k key) clone(buf key) key {
+	if cap(buf) < KeySize {
+		buf = make(key, KeySize)
+	}
+	copy(buf, k)
+	return buf[:KeySize]
 }
 
 // check if k is in (lower,upper]
@@ -69,8 +71,12 @@ func (k key) between(lower, upper key) bool {
 
 type keys []byte
 
-func makeKeys(n int) keys {
-	return make(keys, n*KeySize)
+func makeKeys(n int, buf keys) keys {
+	n *= KeySize
+	if n <= cap(buf) {
+		return buf[:n]
+	}
+	return make(keys, n)
 }
 
 func keysFromBytes(p []byte) (keys, error) {
@@ -85,8 +91,8 @@ func (k keys) length() int {
 }
 
 func (k keys) at(idx int) key {
-	i := idx * KeySize
-	return key(k[i : i+KeySize])
+	idx *= KeySize
+	return key(k[idx : idx+KeySize])
 }
 
 func (k keys) slice(start, end int) keys {
@@ -100,8 +106,8 @@ func (r ring) length() int {
 }
 
 func (r ring) at(idx int) key {
-	i := idx * KeySize
-	return key(r[i : i+KeySize])
+	idx *= KeySize
+	return key(r[idx : idx+KeySize])
 }
 
 func (r ring) slice(start, end int) ring {
@@ -109,12 +115,12 @@ func (r ring) slice(start, end int) ring {
 }
 
 func (r *ring) reserve(newcap int) {
-	if cap(*r) >= newcap*KeySize {
-		return
+	newcap *= KeySize
+	if cap(*r) < newcap {
+		res := make(ring, len(*r), newcap)
+		copy(res, *r)
+		*r = res
 	}
-	res := make(ring, len(*r), newcap*KeySize)
-	copy(res, *r)
-	*r = res
 }
 
 func (r *ring) add(newKey key) int {

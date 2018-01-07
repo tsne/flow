@@ -48,7 +48,7 @@ func TestKeyEqual(t *testing.T) {
 
 func TestKeyClone(t *testing.T) {
 	k1 := intKey(1)
-	k2 := k1.clone()
+	k2 := k1.clone(nil)
 	switch {
 	case &k1[0] == &k2[0]:
 		t.Fatalf("expected to be different: %p and %p", k1, k2)
@@ -116,7 +116,7 @@ func TestKeyBetween(t *testing.T) {
 }
 
 func TestMakeKeys(t *testing.T) {
-	keys := makeKeys(7)
+	keys := makeKeys(7, nil)
 	if len(keys) != 7*KeySize {
 		t.Fatalf("unexpected length: %d", len(keys))
 	}
@@ -364,7 +364,7 @@ func intKey(n int) key {
 }
 
 func intKeys(ns ...int) keys {
-	k := makeKeys(len(ns))
+	k := makeKeys(len(ns), nil)
 	for i := 0; i < len(ns); i++ {
 		binary.BigEndian.PutUint64(k.at(i)[KeySize-8:], uint64(ns[i]))
 	}

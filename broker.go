@@ -75,6 +75,7 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 
 	join := joinMsg{sender: b.routing.local}
 	if err := b.pubsub.sendToGroup(join.marshal(nil)); err != nil {
+		b.pubsub.shutdown()
 		return nil, err
 	}
 
@@ -180,15 +181,16 @@ func (b *Broker) processSub(stream string, data []byte) {
 		return
 	}
 
-	key := BytesKey(pub.partitionKey)
+	pkey := BytesKey(pub.partitionKey)
 
 	var (
 		rid    uint64
 		fwdmsg message
+		succ   key
 		errch  chan error
 	)
 	for {
-		succ := b.routing.successor(key[:])
+		succ = b.routing.successor(pkey[:], succ)
 		if len(succ) == 0 {
 			b.dispatch(Message{
 				Stream:       stream,
@@ -205,7 +207,7 @@ func (b *Broker) processSub(stream string, data []byte) {
 			fwd := fwdMsg{
 				id:     rid,
 				origin: b.routing.local,
-				key:    key[:],
+				key:    pkey[:],
 				stream: stream,
 				pubMsg: pub,
 			}
@@ -238,7 +240,7 @@ func (b *Broker) handleJoin(msg message) {
 	if !join.sender.equal(b.routing.local) {
 		sender := join.sender.array()
 		info := infoMsg{
-			neighbors: b.routing.neighbors(),
+			neighbors: b.routing.neighbors(nil),
 		}
 		b.pubsub.sendToNode(sender[:], info.marshal(msg))
 	}
@@ -274,7 +276,7 @@ func (b *Broker) handlePing(msg message) {
 	sender := ping.sender.array()
 	info := infoMsg{
 		id:        ping.id,
-		neighbors: b.routing.neighbors(),
+		neighbors: b.routing.neighbors(nil),
 	}
 	b.pubsub.sendToNode(sender[:], info.marshal(msg))
 }
@@ -286,7 +288,7 @@ func (b *Broker) handleFwd(msg message) {
 		return
 	}
 
-	if succ := b.routing.successor(fwd.partitionKey); len(succ) != 0 {
+	if succ := b.routing.successor(fwd.partitionKey, nil); len(succ) != 0 {
 		b.pubsub.sendToNode(succ, msg)
 		return
 	}
@@ -358,10 +360,14 @@ func (b *Broker) nextRespID() uint64 {
 func (b *Broker) stabilize(interval time.Duration) {
 	defer b.wg.Done()
 
+	ping := pingMsg{sender: b.routing.local}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	var msg message
+	var (
+		msg   message
+		stabs keys
+	)
 	for {
 		select {
 		case <-b.closed:
@@ -369,8 +375,7 @@ func (b *Broker) stabilize(interval time.Duration) {
 		case <-ticker.C:
 		}
 
-		stabs := b.routing.stabilizers()
-		ping := pingMsg{sender: b.routing.local}
+		stabs = b.routing.stabilizers(stabs)
 		for i, n := 0, stabs.length(); i < n; i++ {
 			key := stabs.at(i)
 			ping.id = b.nextRespID()
