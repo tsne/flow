@@ -2,11 +2,13 @@ package nats
 
 import (
 	"fmt"
+	"strings"
 	"sync"
+	"unicode"
+
+	nats "github.com/nats-io/go-nats"
 
 	"github.com/tsne/flow"
-
-	"github.com/nats-io/nats"
 )
 
 // Conn represents a connection to a NATS server.
@@ -17,12 +19,23 @@ type Conn struct {
 	subs map[string]*nats.Subscription // stream => subscription
 }
 
-// Connect connects to a NATS server with a given address.
-func Connect(addr string) (*Conn, error) {
-	conn, err := nats.Connect(addr)
+// Connect connects to the NATS servers with the given addresses.
+// Address formats follow the NATS convention. For multiple addresses
+// addr should contain a comma separated list.
+func Connect(addr string, opts ...Option) (*Conn, error) {
+	o := nats.GetDefaultOptions()
+	o.Servers = splitAddresses(addr)
+	for _, opt := range opts {
+		if err := opt(&o); err != nil {
+			return nil, err
+		}
+	}
+
+	conn, err := o.Connect()
 	if err != nil {
 		return nil, err
 	}
+
 	return &Conn{
 		Conn: conn,
 		subs: make(map[string]*nats.Subscription),
@@ -71,4 +84,22 @@ func (c *Conn) Unsubscribe(stream string) error {
 		return fmt.Errorf("not subscribed to stream '%s'", stream)
 	}
 	return sub.Unsubscribe()
+}
+
+func splitAddresses(a string) []string {
+	const sep = ','
+
+	a = strings.TrimFunc(a, func(ch rune) bool {
+		return ch == rune(sep) || unicode.IsSpace(ch)
+	})
+
+	addrs := make([]string, 0, 1+strings.Count(a, string(sep)))
+	for {
+		idx := strings.IndexByte(a, sep)
+		if idx < 0 {
+			return append(addrs, strings.TrimSpace(a))
+		}
+		addrs = append(addrs, strings.TrimSpace(a[:idx]))
+		a = a[idx+1:]
+	}
 }

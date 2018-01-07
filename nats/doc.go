@@ -1,3 +1,3 @@
-// Package nats provides the implementation for the publisher and subscriber
-// interfaces of the flow package.
+// Package nats provides an implementation for the flow pub/sub interface
+// which uses NATS.
 package nats
