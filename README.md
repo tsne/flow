@@ -36,7 +36,7 @@ func main() {
 
 	pubsub, err := nats.Connect("nats://localhost:4222")
 	if err != nil {
-		log.Fatalf("error connection to pubsub: %v", err)
+		log.Fatalf("error connecting to pubsub: %v", err)
 	}
 	defer pubsub.Close()
 

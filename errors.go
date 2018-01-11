@@ -1,21 +1,27 @@
 package flow
 
+import "fmt"
+
 const (
 	errRespTimeout   = errorString("response timeout")
 	errMalformedKey  = errorString("malformed key")
 	errMalformedKeys = errorString("malformed keys")
 
-	errMalformedMessage  = protocolError("malformed message")
-	errMalformedJoinMsg  = protocolError("malformed join message")
-	errMalformedLeaveMsg = protocolError("malformed leave message")
-	errMalformedInfoMsg  = protocolError("malformed info message")
-	errMalformedPingMsg  = protocolError("malformed ping message")
-	errMalformedAckMsg   = protocolError("malformed ack message")
-	errMalformedPubMsg   = protocolError("malformed pub message")
-	errMalformedFwdMsg   = protocolError("malformed fwd message")
+	errMalformedMessage = protocolError("malformed message")
+	errMalformedJoin    = protocolError("malformed join")
+	errMalformedLeave   = protocolError("malformed leave")
+	errMalformedInfo    = protocolError("malformed info")
+	errMalformedPing    = protocolError("malformed ping")
+	errMalformedAck     = protocolError("malformed ack")
+	errMalformedPub     = protocolError("malformed pub")
+	errMalformedFwd     = protocolError("malformed fwd")
 )
 
 type errorString string
+
+func errorf(format string, args ...interface{}) error {
+	return errorString(fmt.Sprintf(format, args...))
+}
 
 func (e errorString) Error() string {
 	return string(e)

@@ -64,12 +64,12 @@ func TestMessageReset(t *testing.T) {
 	}
 }
 
-func TestJoinMsgMarshalling(t *testing.T) {
-	join := joinMsg{
+func TestMarshalJoin(t *testing.T) {
+	join := join{
 		sender: intKey(7),
 	}
 
-	msg := join.marshal(nil)
+	msg := marshalJoin(join, nil)
 	switch {
 	case msg.typ() != msgTypeJoin:
 		t.Fatalf("unexpected message type: %s", msg.typ())
@@ -77,8 +77,7 @@ func TestJoinMsgMarshalling(t *testing.T) {
 		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
 	}
 
-	var unmarshalled joinMsg
-	err := unmarshalled.unmarshal(msg)
+	unmarshalled, err := unmarshalJoin(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -87,12 +86,12 @@ func TestJoinMsgMarshalling(t *testing.T) {
 	}
 }
 
-func TestLeaveMsgMarshalling(t *testing.T) {
-	leave := leaveMsg{
+func TestMarshalLeave(t *testing.T) {
+	leave := leave{
 		node: intKey(7),
 	}
 
-	msg := leave.marshal(nil)
+	msg := marshalLeave(leave, nil)
 	switch {
 	case msg.typ() != msgTypeLeave:
 		t.Fatalf("unexpected message type: %s", msg.typ())
@@ -100,8 +99,7 @@ func TestLeaveMsgMarshalling(t *testing.T) {
 		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
 	}
 
-	var unmarshalled leaveMsg
-	err := unmarshalled.unmarshal(msg)
+	unmarshalled, err := unmarshalLeave(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -110,13 +108,13 @@ func TestLeaveMsgMarshalling(t *testing.T) {
 	}
 }
 
-func TestInfoMsgMarshalling(t *testing.T) {
-	info := infoMsg{
+func TestMarshalInfo(t *testing.T) {
+	info := info{
 		id:        7,
 		neighbors: intKeys(1, 2, 3, 4),
 	}
 
-	msg := info.marshal(nil)
+	msg := marshalInfo(info, nil)
 	switch {
 	case msg.typ() != msgTypeInfo:
 		t.Fatalf("unexpected message type: %s", msg.typ())
@@ -124,8 +122,7 @@ func TestInfoMsgMarshalling(t *testing.T) {
 		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
 	}
 
-	var unmarshalled infoMsg
-	err := unmarshalled.unmarshal(msg)
+	unmarshalled, err := unmarshalInfo(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -134,13 +131,13 @@ func TestInfoMsgMarshalling(t *testing.T) {
 	}
 }
 
-func TestPingMsgMarshalling(t *testing.T) {
-	ping := pingMsg{
+func TestMarshalPing(t *testing.T) {
+	ping := ping{
 		id:     7,
 		sender: intKey(1),
 	}
 
-	msg := ping.marshal(nil)
+	msg := marshalPing(ping, nil)
 	switch {
 	case msg.typ() != msgTypePing:
 		t.Fatalf("unexpected message type: %s", msg.typ())
@@ -148,8 +145,7 @@ func TestPingMsgMarshalling(t *testing.T) {
 		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
 	}
 
-	var unmarshalled pingMsg
-	err := unmarshalled.unmarshal(msg)
+	unmarshalled, err := unmarshalPing(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -158,13 +154,13 @@ func TestPingMsgMarshalling(t *testing.T) {
 	}
 }
 
-func TestAckMsgMarshalling(t *testing.T) {
-	ack := ackMsg{
+func TestMarshalAck(t *testing.T) {
+	ack := ack{
 		id:  7,
 		err: ackError("error text"),
 	}
 
-	msg := ack.marshal(nil)
+	msg := marshalAck(ack, nil)
 	switch {
 	case msg.typ() != msgTypeAck:
 		t.Fatalf("unexpected message type: %s", msg.typ())
@@ -172,8 +168,7 @@ func TestAckMsgMarshalling(t *testing.T) {
 		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
 	}
 
-	var unmarshalled ackMsg
-	err := unmarshalled.unmarshal(msg)
+	unmarshalled, err := unmarshalAck(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -182,11 +177,9 @@ func TestAckMsgMarshalling(t *testing.T) {
 	}
 
 	// no error
-	ack = ackMsg{
-		id: 7,
-	}
+	ack.err = nil
 
-	msg = ack.marshal(nil)
+	msg = marshalAck(ack, nil)
 	switch {
 	case msg.typ() != msgTypeAck:
 		t.Fatalf("unexpected message type: %s", msg.typ())
@@ -194,7 +187,7 @@ func TestAckMsgMarshalling(t *testing.T) {
 		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
 	}
 
-	err = unmarshalled.unmarshal(msg)
+	unmarshalled, err = unmarshalAck(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -203,15 +196,15 @@ func TestAckMsgMarshalling(t *testing.T) {
 	}
 }
 
-func TestPubMsgMarshalling(t *testing.T) {
-	pub := pubMsg{
+func TestMarshalPub(t *testing.T) {
+	pub := pub{
 		source:       []byte("source id"),
 		time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 		partitionKey: []byte("partition key"),
 		payload:      []byte("payload"),
 	}
 
-	msg := pub.marshal(nil)
+	msg := marshalPub(pub, nil)
 	switch {
 	case msg.typ() != msgTypePub:
 		t.Fatalf("unexpected message type: %s", msg.typ())
@@ -219,8 +212,7 @@ func TestPubMsgMarshalling(t *testing.T) {
 		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
 	}
 
-	var unmarshalled pubMsg
-	err := unmarshalled.unmarshal(msg)
+	unmarshalled, err := unmarshalPub(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -229,14 +221,14 @@ func TestPubMsgMarshalling(t *testing.T) {
 	}
 }
 
-func TestFwdMsgMarshalling(t *testing.T) {
+func TestMarshalFwd(t *testing.T) {
 	keys := intKeys(1, 2)
-	fwd := fwdMsg{
+	fwd := fwd{
 		id:     7,
 		origin: keys.at(0),
 		key:    keys.at(1),
 		stream: "stream",
-		pubMsg: pubMsg{
+		pub: pub{
 			source:       []byte("source id"),
 			time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 			partitionKey: []byte("partition key"),
@@ -244,7 +236,7 @@ func TestFwdMsgMarshalling(t *testing.T) {
 		},
 	}
 
-	msg := fwd.marshal(nil)
+	msg := marshalFwd(fwd, nil)
 	switch {
 	case msg.typ() != msgTypeFwd:
 		t.Fatalf("unexpected message type: %s", msg.typ())
@@ -252,8 +244,7 @@ func TestFwdMsgMarshalling(t *testing.T) {
 		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
 	}
 
-	var unmarshalled fwdMsg
-	err := unmarshalled.unmarshal(msg)
+	unmarshalled, err := unmarshalFwd(msg)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)

@@ -72,8 +72,8 @@ func Group(name string) Option {
 // the assigned group.
 func NodeKey(k Key) Option {
 	return func(o *options) error {
-		if len(o.nodeKey) != len(k) {
-			o.nodeKey = make(key, len(k))
+		if len(o.nodeKey) != KeySize {
+			o.nodeKey = alloc(KeySize, nil)
 		}
 		copy(o.nodeKey, k[:])
 		return nil
@@ -154,7 +154,7 @@ func AckTimeout(d time.Duration) Option {
 }
 
 func defaultNodeKey() (key, error) {
-	k := make(key, KeySize)
+	k := alloc(KeySize, nil)
 	_, err := rand.Read(k)
 	return k, err
 }

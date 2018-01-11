@@ -1,9 +1,17 @@
 package flow
 
-import "sync"
+import (
+	"encoding/hex"
+	"sync"
+)
 
 // PubSubHandler represents a handler for the plugged-in pub/sub system.
 type PubSubHandler func(stream string, data []byte)
+
+// Subscription defines an interface for an interest in a given stream.
+type Subscription interface {
+	Unsubscribe() error
+}
 
 // PubSub defines an interface for the pluggable pub/sub system.
 //
@@ -11,50 +19,41 @@ type PubSubHandler func(stream string, data []byte)
 // system and is used to publish binary data to a specific stream
 // (also known as topic).
 //
-// The Subscribe and Unsubscribe methods define the subscribing side
-// of the pub/sub system and are used to subscribe to and unsubscribe
-// from a stream respectively. The subscription has to support queue
-// grouping, where a message is delivered to only one subscriber in
-// a group.
+// The Subscribe method describes the subscribing side of the pub/sub
+// system and is used to subscribe to a given stream. The subscription
+// has to support queue grouping, where a message is delivered to only
+// one subscriber in a group. If the group parameter is empty, the
+// messages should be sent to every subscriber.
 type PubSub interface {
 	Publish(stream string, data []byte) error
-	Subscribe(stream, group string, h PubSubHandler) error
-	Unsubscribe(stream string) error
+	Subscribe(stream, group string, h PubSubHandler) (Subscription, error)
 }
 
 type pubsub struct {
 	PubSub
-	groupStream string
-	nodeStream  string
+	groupName string
+	nodeName  string
 
 	subsMtx sync.Mutex
-	subs    map[string]struct{}
+	subs    map[string]Subscription
 }
 
 func newPubSub(ps PubSub, opts options) pubsub {
 	return pubsub{
-		PubSub:      ps,
-		groupStream: opts.groupName,
-		nodeStream:  opts.groupName + "." + opts.nodeKey.String(),
-		subs:        make(map[string]struct{}),
+		PubSub:    ps,
+		groupName: opts.groupName,
+		nodeName:  nodeName(opts.groupName, opts.nodeKey),
+		subs:      make(map[string]Subscription),
 	}
 }
 
 func (ps *pubsub) sendToGroup(msg message) error {
-	if err := ps.PubSub.Publish(ps.groupStream, msg); err != nil {
-		logf("group publish error: %v", err)
-		return err
-	}
-	return nil
+	return ps.PubSub.Publish(ps.groupName, msg)
 }
 
 func (ps *pubsub) sendToNode(target key, msg message) error {
-	stream := ps.groupStream + "." + target.String()
-	if err := ps.PubSub.Publish(stream, msg); err != nil {
-		logf("node send error: %v", err)
-		return err
-	}
-	return nil
+	stream := nodeName(ps.groupName, target)
+	return ps.PubSub.Publish(stream, msg)
 }
 
 func (ps *pubsub) publish(stream string, msg message) error {
@@ -62,33 +61,70 @@ func (ps *pubsub) publish(stream string, msg message) error {
 }
 
 func (ps *pubsub) subscribeGroup(h PubSubHandler) error {
-	if err := ps.PubSub.Subscribe(ps.groupStream, "", h); err != nil {
+	ps.subsMtx.Lock()
+	defer ps.subsMtx.Unlock()
+
+	_, hasGroupSub := ps.subs[ps.groupName]
+	_, hasNodeSub := ps.subs[ps.nodeName]
+	if hasGroupSub || hasNodeSub {
+		return errorf("already subscribed to group '%s'", ps.groupName)
+	}
+
+	groupSub, err := ps.PubSub.Subscribe(ps.groupName, "", h)
+	if err != nil {
 		return err
 	}
-	if err := ps.PubSub.Subscribe(ps.nodeStream, "", h); err != nil {
-		ps.PubSub.Unsubscribe(ps.groupStream)
+
+	nodeSub, err := ps.PubSub.Subscribe(ps.nodeName, "", h)
+	if err != nil {
+		unsubscribe(ps.groupName, groupSub)
 		return err
 	}
+
+	ps.subs[ps.groupName] = groupSub
+	ps.subs[ps.nodeName] = nodeSub
 	return nil
 }
 
 func (ps *pubsub) subscribe(stream string, h PubSubHandler) error {
-	if err := ps.PubSub.Subscribe(stream, ps.groupStream, h); err != nil {
+	sub, err := ps.PubSub.Subscribe(stream, ps.groupName, h)
+	if err != nil {
 		return err
 	}
+
 	ps.subsMtx.Lock()
-	ps.subs[stream] = struct{}{}
+	_, has := ps.subs[stream]
+	if !has {
+		ps.subs[stream] = sub
+	}
 	ps.subsMtx.Unlock()
+
+	if has {
+		unsubscribe(stream, sub)
+		return errorf("already subscribed to '%s'", stream)
+	}
 	return nil
 }
 
 func (ps *pubsub) shutdown() {
 	ps.subsMtx.Lock()
-	for stream := range ps.subs {
-		ps.PubSub.Unsubscribe(stream)
-	}
-	ps.subsMtx.Unlock()
+	defer ps.subsMtx.Unlock()
 
-	ps.PubSub.Unsubscribe(ps.nodeStream)
-	ps.PubSub.Unsubscribe(ps.groupStream)
+	for stream, sub := range ps.subs {
+		unsubscribe(stream, sub)
+	}
+}
+
+func unsubscribe(stream string, sub Subscription) {
+	if err := sub.Unsubscribe(); err != nil {
+		logf("error unsubscribing from '%s'", stream)
+	}
+}
+
+func nodeName(groupName string, nodeKey key) string {
+	buf := alloc(len(groupName)+1+2*KeySize, nil)
+	n := copy(buf, groupName)
+	buf[n] = '.'
+	hex.Encode(buf[n+1:], nodeKey)
+	return string(buf)
 }

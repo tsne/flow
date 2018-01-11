@@ -16,7 +16,7 @@ type Message struct {
 }
 
 // Handler represents a callback function for handling incoming messages.
-type Handler func(msg *Message)
+type Handler func(msg Message)
 
 type pendingResp struct {
 	receiver key
@@ -36,8 +36,8 @@ type Broker struct {
 	storage storage
 	respID  uint64
 
-	wg     sync.WaitGroup
-	closed chan struct{}
+	wg      sync.WaitGroup
+	closing chan struct{}
 
 	pendingMtx   sync.Mutex
 	pendingResps map[uint64]pendingResp // id => pending response
@@ -63,7 +63,7 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 		routing:      newRoutingTable(opts),
 		pubsub:       newPubSub(pubsub, opts),
 		storage:      newStorage(opts),
-		closed:       make(chan struct{}),
+		closing:      make(chan struct{}),
 		pendingResps: make(map[uint64]pendingResp),
 		handlers:     make(map[string][]Handler),
 	}
@@ -73,8 +73,8 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 		return nil, err
 	}
 
-	join := joinMsg{sender: b.routing.local}
-	if err := b.pubsub.sendToGroup(join.marshal(nil)); err != nil {
+	join := marshalJoin(join{sender: b.routing.local}, nil)
+	if err := b.pubsub.sendToGroup(join); err != nil {
 		b.pubsub.shutdown()
 		return nil, err
 	}
@@ -87,10 +87,12 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 // Close notifies all group members about a leaving broker and
 // diconnects from the pub/sub system.
 func (b *Broker) Close() error {
-	close(b.closed)
+	close(b.closing)
 
-	leave := leaveMsg{node: b.routing.local}
-	b.pubsub.sendToGroup(leave.marshal(nil))
+	leave := marshalLeave(leave{node: b.routing.local}, nil)
+	if err := b.pubsub.sendToGroup(leave); err != nil {
+		logf("group broadcast error: %v", err)
+	}
 	b.pubsub.shutdown()
 
 	b.wg.Wait()
@@ -109,13 +111,12 @@ func (b *Broker) Publish(msg Message) error {
 		return err
 	}
 
-	pub := pubMsg{
+	return b.pubsub.publish(msg.Stream, marshalPub(pub{
 		source:       msg.Source,
 		time:         msg.Time,
 		partitionKey: msg.PartitionKey,
 		payload:      msg.Data,
-	}
-	return b.pubsub.publish(msg.Stream, pub.marshal(nil))
+	}, nil))
 }
 
 // Subscribe subscribes to the messages of the specified stream.
@@ -164,8 +165,8 @@ func (b *Broker) processSub(stream string, data []byte) {
 		return
 	}
 
-	var pub pubMsg
-	if err := pub.unmarshal(msg); err != nil {
+	pub, err := unmarshalPub(msg)
+	if err != nil {
 		logf("published message error: %v", err)
 		return
 	}
@@ -185,9 +186,9 @@ func (b *Broker) processSub(stream string, data []byte) {
 
 	var (
 		rid    uint64
+		errch  chan error
 		fwdmsg message
 		succ   key
-		errch  chan error
 	)
 	for {
 		succ = b.routing.successor(pkey[:], succ)
@@ -204,19 +205,18 @@ func (b *Broker) processSub(stream string, data []byte) {
 
 		if len(fwdmsg) == 0 {
 			rid = b.nextRespID()
-			fwd := fwdMsg{
+			errch = make(chan error)
+			fwdmsg = marshalFwd(fwd{
 				id:     rid,
 				origin: b.routing.local,
 				key:    pkey[:],
 				stream: stream,
-				pubMsg: pub,
-			}
-			fwdmsg = fwd.marshal(nil)
-			errch = make(chan error)
+				pub:    pub,
+			}, nil)
 		}
 
 		b.awaitResp(succ, rid, errch)
-		b.pubsub.sendToNode(succ, fwdmsg)
+		b.sendTo(succ, fwdmsg)
 		if err := <-errch; err != nil {
 			if err == errRespTimeout {
 				// The node was suspected and removed from the
@@ -231,24 +231,23 @@ func (b *Broker) processSub(stream string, data []byte) {
 }
 
 func (b *Broker) handleJoin(msg message) {
-	var join joinMsg
-	if err := join.unmarshal(msg); err != nil {
+	join, err := unmarshalJoin(msg)
+	if err != nil {
 		logf("join unmarshal error: %v", err)
 		return
 	}
 	b.routing.register(keys(join.sender))
 	if !join.sender.equal(b.routing.local) {
 		sender := join.sender.array()
-		info := infoMsg{
+		b.sendTo(sender[:], marshalInfo(info{
 			neighbors: b.routing.neighbors(nil),
-		}
-		b.pubsub.sendToNode(sender[:], info.marshal(msg))
+		}, msg))
 	}
 }
 
 func (b *Broker) handleLeave(msg message) {
-	var leave leaveMsg
-	if err := leave.unmarshal(msg); err != nil {
+	leave, err := unmarshalLeave(msg)
+	if err != nil {
 		logf("leave unmarshal error: %v", err)
 		return
 	}
@@ -256,8 +255,8 @@ func (b *Broker) handleLeave(msg message) {
 }
 
 func (b *Broker) handleInfo(msg message) {
-	var info infoMsg
-	if err := info.unmarshal(msg); err != nil {
+	info, err := unmarshalInfo(msg)
+	if err != nil {
 		logf("info unmarshal error: %v", err)
 		return
 	}
@@ -267,29 +266,28 @@ func (b *Broker) handleInfo(msg message) {
 }
 
 func (b *Broker) handlePing(msg message) {
-	var ping pingMsg
-	if err := ping.unmarshal(msg); err != nil {
+	ping, err := unmarshalPing(msg)
+	if err != nil {
 		logf("ping unmarshal error: %v", err)
 		return
 	}
 
 	sender := ping.sender.array()
-	info := infoMsg{
+	b.sendTo(sender[:], marshalInfo(info{
 		id:        ping.id,
 		neighbors: b.routing.neighbors(nil),
-	}
-	b.pubsub.sendToNode(sender[:], info.marshal(msg))
+	}, msg))
 }
 
 func (b *Broker) handleFwd(msg message) {
-	var fwd fwdMsg
-	if err := fwd.unmarshal(msg); err != nil {
+	fwd, err := unmarshalFwd(msg)
+	if err != nil {
 		logf("fwd unmarshal error: %v", err)
 		return
 	}
 
 	if succ := b.routing.successor(fwd.partitionKey, nil); len(succ) != 0 {
-		b.pubsub.sendToNode(succ, msg)
+		b.sendTo(succ, msg)
 		return
 	}
 
@@ -302,13 +300,14 @@ func (b *Broker) handleFwd(msg message) {
 	})
 
 	origin := fwd.origin.array()
-	ack := ackMsg{id: fwd.id}
-	b.pubsub.sendToNode(origin[:], ack.marshal(msg))
+	b.sendTo(origin[:], marshalAck(ack{
+		id: fwd.id,
+	}, msg))
 }
 
 func (b *Broker) handleAck(msg message) {
-	var ack ackMsg
-	if err := ack.unmarshal(msg); err != nil {
+	ack, err := unmarshalAck(msg)
+	if err != nil {
 		logf("ack unmarshal error: %v", err)
 		return
 	}
@@ -320,7 +319,7 @@ func (b *Broker) dispatch(msg Message) {
 	handlers := b.handlers[msg.Stream]
 	b.handlersMtx.RUnlock()
 	for _, h := range handlers {
-		h(&msg)
+		h(msg)
 	}
 }
 
@@ -353,6 +352,12 @@ func (b *Broker) notifyResp(rid uint64, err error) {
 	}
 }
 
+func (b *Broker) sendTo(target key, msg message) {
+	if err := b.pubsub.sendToNode(target, msg); err != nil {
+		logf("node send error: %v", err)
+	}
+}
+
 func (b *Broker) nextRespID() uint64 {
 	return atomic.AddUint64(&b.respID, 1)
 }
@@ -360,7 +365,7 @@ func (b *Broker) nextRespID() uint64 {
 func (b *Broker) stabilize(interval time.Duration) {
 	defer b.wg.Done()
 
-	ping := pingMsg{sender: b.routing.local}
+	ping := ping{sender: b.routing.local}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -370,7 +375,7 @@ func (b *Broker) stabilize(interval time.Duration) {
 	)
 	for {
 		select {
-		case <-b.closed:
+		case <-b.closing:
 			return
 		case <-ticker.C:
 		}
@@ -379,7 +384,7 @@ func (b *Broker) stabilize(interval time.Duration) {
 		for i, n := 0, stabs.length(); i < n; i++ {
 			key := stabs.at(i)
 			ping.id = b.nextRespID()
-			msg = ping.marshal(msg)
+			msg = marshalPing(ping, msg)
 			if b.pubsub.sendToNode(key, msg) == nil {
 				b.awaitResp(key, ping.id, nil)
 			}

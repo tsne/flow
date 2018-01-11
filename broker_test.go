@@ -35,10 +35,10 @@ func TestNewBroker(t *testing.T) {
 		t.Fatalf("unexpected ack timeout: %v", b.ackTimeout)
 	case b.respID != 0:
 		t.Fatalf("unexpected message id: %d", b.respID)
-	case b.closed == nil:
-		t.Fatal("no closed channel")
+	case b.closing == nil:
+		t.Fatal("no closing channel")
 	case b.pendingResps == nil:
-		t.Fatal("no closed pending response map")
+		t.Fatal("no pending response map")
 	case len(b.pendingResps) != 0:
 		t.Fatalf("unexpected number of pending responses: %d", len(b.pendingResps))
 	case b.handlers == nil:
@@ -114,12 +114,12 @@ func TestBrokerPublish(t *testing.T) {
 		t.Fatalf("unexpected message type: %s", published.typ())
 	}
 
-	var pubmsg pubMsg
-	if err := pubmsg.unmarshal(published); err != nil {
+	pub, err := unmarshalPub(published)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !bytes.Equal(pubmsg.source, msg.Source) || !pubmsg.time.Equal(msg.Time) || !bytes.Equal(pubmsg.partitionKey, msg.PartitionKey) || !bytes.Equal(pubmsg.payload, msg.Data) {
-		t.Fatalf("unexpected pub message: %+v", pubmsg)
+	if !bytes.Equal(pub.source, msg.Source) || !pub.time.Equal(msg.Time) || !bytes.Equal(pub.partitionKey, msg.PartitionKey) || !bytes.Equal(pub.payload, msg.Data) {
+		t.Fatalf("unexpected pub message: %+v", pub)
 	}
 }
 
@@ -144,7 +144,7 @@ func TestBrokerSubscribe(t *testing.T) {
 		handlers: make(map[string][]Handler),
 	}
 
-	err := b.Subscribe("stream", func(*Message) {})
+	err := b.Subscribe("stream", func(Message) {})
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -158,12 +158,12 @@ func TestBrokerSubscribe(t *testing.T) {
 	switch {
 	case s == nil:
 		t.Fatal("no subscription")
-	case s.group != b.pubsub.groupStream:
+	case s.group != b.pubsub.groupName:
 		t.Fatalf("unexpected subscription group: %s", s.group)
 	}
 
 	// subscribe to the same stream again
-	err = b.Subscribe("stream", func(*Message) {})
+	err = b.Subscribe("stream", func(Message) {})
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -177,7 +177,7 @@ func TestBrokerSubscribe(t *testing.T) {
 	switch {
 	case s == nil:
 		t.Fatal("no subscription")
-	case s.group != b.pubsub.groupStream:
+	case s.group != b.pubsub.groupName:
 		t.Fatalf("unexpected subscription group: %s", s.group)
 	}
 }
@@ -194,7 +194,7 @@ func TestBrokerHandleJoin(t *testing.T) {
 		pubsub:  newPubSub(rec, opts),
 	}
 
-	join := joinMsg{
+	join := join{
 		sender: keys.at(1),
 	}
 
@@ -205,7 +205,7 @@ func TestBrokerHandleJoin(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processGroupSubs("stream", join.marshal(nil))
+		b.processGroupSubs("stream", marshalJoin(join, nil))
 	}()
 	go func() {
 		defer wg.Done()
@@ -222,8 +222,8 @@ func TestBrokerHandleJoin(t *testing.T) {
 		t.Fatalf("unexpected message type: %s", msg.typ())
 	}
 
-	var info infoMsg
-	if err := info.unmarshal(msg); err != nil {
+	info, err := unmarshalInfo(msg)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	} else if info.neighbors.length() == 0 {
 		t.Fatalf("unexpected number of neighbors: %d", info.neighbors.length())
@@ -240,10 +240,9 @@ func TestBrokerHandleLeave(t *testing.T) {
 	}
 	b.routing.register(keys)
 
-	leave := leaveMsg{
+	b.processGroupSubs("stream", marshalLeave(leave{
 		node: keys.at(1),
-	}
-	b.processGroupSubs("stream", leave.marshal(nil))
+	}, nil))
 
 	if b.routing.keys.length() != 0 {
 		t.Fatalf("unexpected number of keys: %d", b.routing.keys.length())
@@ -262,11 +261,10 @@ func TestBrokerHandleInfo(t *testing.T) {
 		},
 	}
 
-	info := infoMsg{
+	b.processGroupSubs("stream", marshalInfo(info{
 		id:        1,
 		neighbors: keys,
-	}
-	b.processGroupSubs("stream", info.marshal(nil))
+	}, nil))
 
 	switch {
 	case len(b.pendingResps) != 0:
@@ -289,7 +287,7 @@ func TestBrokerHandlePing(t *testing.T) {
 		pubsub: newPubSub(rec, opts),
 	}
 
-	ping := pingMsg{
+	ping := ping{
 		id:     1,
 		sender: keys.at(1),
 	}
@@ -301,7 +299,7 @@ func TestBrokerHandlePing(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processGroupSubs("stream", ping.marshal(nil))
+		b.processGroupSubs("stream", marshalPing(ping, nil))
 	}()
 	go func() {
 		defer wg.Done()
@@ -313,8 +311,8 @@ func TestBrokerHandlePing(t *testing.T) {
 		t.Fatalf("unexpected message type: %s", msg.typ())
 	}
 
-	var info infoMsg
-	if err := info.unmarshal(msg); err != nil {
+	info, err := unmarshalInfo(msg)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	} else if info.neighbors.length() == 0 {
 		t.Fatalf("unexpected number of neighbors: %d", info.neighbors.length())
@@ -327,11 +325,11 @@ func TestBrokerHandleFwd(t *testing.T) {
 	opts.nodeKey = keys.at(0)
 	opts.groupName = "group"
 
-	fwd := fwdMsg{
+	fwd := fwd{
 		id:     11,
 		origin: keys.at(1),
 		stream: "fwdstream",
-		pubMsg: pubMsg{
+		pub: pub{
 			source:       []byte("source id"),
 			time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 			partitionKey: keys.at(2),
@@ -347,7 +345,7 @@ func TestBrokerHandleFwd(t *testing.T) {
 		pubsub:  newPubSub(rec, opts),
 		handlers: map[string][]Handler{
 			fwd.stream: {
-				func(msg *Message) {
+				func(msg Message) {
 					switch {
 					case msg.Stream != fwd.stream:
 						t.Fatalf("unexpected stream: %s", msg.Stream)
@@ -373,7 +371,7 @@ func TestBrokerHandleFwd(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processGroupSubs("stream", fwd.marshal(nil))
+		b.processGroupSubs("stream", marshalFwd(fwd, nil))
 	}()
 	go func() {
 		defer wg.Done()
@@ -389,8 +387,8 @@ func TestBrokerHandleFwd(t *testing.T) {
 		t.Fatalf("unexpected message type: %s", msg.typ())
 	}
 
-	var ack ackMsg
-	if err := ack.unmarshal(msg); err != nil {
+	ack, err := unmarshalAck(msg)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	} else if ack.id != fwd.id {
 		t.Fatalf("unexpected ack id: %d", ack.id)
@@ -401,7 +399,7 @@ func TestBrokerHandleFwd(t *testing.T) {
 	// forward again
 	rec.clear()
 	handlerCalled = false
-	fwdmsg := fwd.marshal(nil)
+	fwdmsg := marshalFwd(fwd, nil)
 	b.routing.register(keys)
 
 	wg.Add(2)
@@ -434,7 +432,7 @@ func TestBrokerHandleAck(t *testing.T) {
 		},
 	}
 
-	ack := ackMsg{
+	ack := ack{
 		id:  7,
 		err: ackError("error"),
 	}
@@ -446,7 +444,7 @@ func TestBrokerHandleAck(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processGroupSubs("stream", ack.marshal(nil))
+		b.processGroupSubs("stream", marshalAck(ack, nil))
 	}()
 	go func() {
 		defer wg.Done()
@@ -464,7 +462,7 @@ func TestBrokerHandleAck(t *testing.T) {
 
 func TestBrokerProcessSub(t *testing.T) {
 	handlerCalled := false
-	pubmsg := pubMsg{
+	pub := pub{
 		source:  []byte("source id"),
 		time:    time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 		payload: []byte("payload"),
@@ -483,17 +481,17 @@ func TestBrokerProcessSub(t *testing.T) {
 		pubsub:  newPubSub(rec, opts),
 		handlers: map[string][]Handler{
 			"stream": {
-				func(msg *Message) {
+				func(msg Message) {
 					switch {
 					case msg.Stream != "stream":
 						t.Fatalf("unexpected stream: %s", msg.Stream)
-					case !bytes.Equal(msg.Source, pubmsg.source):
+					case !bytes.Equal(msg.Source, pub.source):
 						t.Fatalf("unexpected source: %s", msg.Source)
-					case !msg.Time.Equal(pubmsg.time):
+					case !msg.Time.Equal(pub.time):
 						t.Fatalf("unexpected time: %s", msg.Time)
-					case !bytes.Equal(msg.PartitionKey, pubmsg.partitionKey):
+					case !bytes.Equal(msg.PartitionKey, pub.partitionKey):
 						t.Fatalf("unexpected partition key: %s", msg.PartitionKey)
-					case !bytes.Equal(msg.Data, pubmsg.payload):
+					case !bytes.Equal(msg.Data, pub.payload):
 						t.Fatalf("unexpected payload: %s", msg.Data)
 					}
 					handlerCalled = true
@@ -504,16 +502,16 @@ func TestBrokerProcessSub(t *testing.T) {
 	}
 
 	// local dispatch without partition key
-	b.processSub("stream", pubmsg.marshal(nil))
+	b.processSub("stream", marshalPub(pub, nil))
 	if !handlerCalled {
 		t.Fatal("expected handler to be called")
 	}
 
 	// local dispatch with partition key
 	handlerCalled = false
-	pubmsg.partitionKey = []byte("partition key")
+	pub.partitionKey = []byte("partition key")
 
-	b.processSub("stream", pubmsg.marshal(nil))
+	b.processSub("stream", marshalPub(pub, nil))
 	if !handlerCalled {
 		t.Fatal("expected handler to be called")
 	}
@@ -527,24 +525,23 @@ func TestBrokerProcessSub(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processSub("stream", pubmsg.marshal(nil))
+		b.processSub("stream", marshalPub(pub, nil))
 	}()
 	go func() {
 		defer wg.Done()
-		msg := <-rec.pubchan("group." + key(pkey[:]).String())
+		msg := <-rec.pubchan("group." + pkey.String())
 		if msg.typ() != msgTypeFwd {
 			t.Fatalf("unexpected message type: %s", msg.typ())
 		}
 
-		var fwd fwdMsg
-		if err := fwd.unmarshal(msg); err != nil {
+		fwd, err := unmarshalFwd(msg)
+		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
-		} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || fwd.stream != "stream" || !bytes.Equal(fwd.partitionKey, pubmsg.partitionKey) || !bytes.Equal(fwd.payload, pubmsg.payload) {
+		} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || fwd.stream != "stream" || !bytes.Equal(fwd.partitionKey, pub.partitionKey) || !bytes.Equal(fwd.payload, pub.payload) {
 			t.Fatalf("unexpected fwd message: %+v", fwd)
 		}
 
-		ack := ackMsg{id: fwd.id}
-		b.processGroupSubs("stream", ack.marshal(nil))
+		b.processGroupSubs("stream", marshalAck(ack{id: fwd.id}, nil))
 	}()
 	wg.Wait()
 
@@ -561,11 +558,11 @@ func TestBrokerProcessSub(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processSub("stream", pubmsg.marshal(nil))
+		b.processSub("stream", marshalPub(pub, nil))
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-rec.pubchan("group." + key(pkey[:]).String())
+		msg = <-rec.pubchan("group." + pkey.String())
 	}()
 	wg.Wait()
 
@@ -578,10 +575,10 @@ func TestBrokerProcessSub(t *testing.T) {
 		t.Fatalf("unexpected number of routing keys: %d", b.routing.keys.length())
 	}
 
-	var fwd fwdMsg
-	if err := fwd.unmarshal(msg); err != nil {
+	fwd, err := unmarshalFwd(msg)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || fwd.stream != "stream" || !bytes.Equal(fwd.partitionKey, pubmsg.partitionKey) || !bytes.Equal(fwd.payload, pubmsg.payload) {
+	} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || fwd.stream != "stream" || !bytes.Equal(fwd.partitionKey, pub.partitionKey) || !bytes.Equal(fwd.payload, pub.payload) {
 		t.Fatalf("unexpected fwd message: %+v", fwd)
 	}
 }
@@ -597,7 +594,7 @@ func TestBrokerStabilize(t *testing.T) {
 		ackTimeout:   time.Second,
 		routing:      newRoutingTable(opts),
 		pubsub:       newPubSub(rec, opts),
-		closed:       make(chan struct{}),
+		closing:      make(chan struct{}),
 		pendingResps: make(map[uint64]pendingResp),
 	}
 	b.routing.register(keys)
@@ -617,7 +614,7 @@ func TestBrokerStabilize(t *testing.T) {
 		for i := 0; i < len(msgs); i++ {
 			msgs[i] = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 		}
-		close(b.closed)
+		close(b.closing)
 	}()
 	wg.Wait()
 
@@ -626,8 +623,8 @@ func TestBrokerStabilize(t *testing.T) {
 			t.Fatalf("unexpected message type at %d: %s", i, msg.typ())
 		}
 
-		var ping pingMsg
-		if err := ping.unmarshal(msg); err != nil {
+		ping, err := unmarshalPing(msg)
+		if err != nil {
 			t.Fatalf("unexpected error at %d: %v", i, err)
 		} else if ping.id == 0 || !ping.sender.equal(b.routing.local) {
 			t.Fatalf("unexpected ping message at %d: %+v", i, ping)

@@ -34,12 +34,11 @@ func (r *routingTable) register(keys keys) {
 }
 
 func (r *routingTable) unregister(k key) {
-	if k.equal(r.local) {
-		return
+	if !k.equal(r.local) {
+		r.mtx.Lock()
+		r.removeKey(k)
+		r.mtx.Unlock()
 	}
-	r.mtx.Lock()
-	r.removeKey(k)
-	r.mtx.Unlock()
 }
 
 func (r *routingTable) suspect(k key) {
@@ -83,11 +82,12 @@ func (r *routingTable) stabilizers(buf keys) keys {
 		buf = makeKeys(nkeys, buf)
 		copy(buf, r.keys)
 	} else {
+		r.stabIdx %= nkeys
 		buf = makeKeys(stabilizerCount, buf)
 		copy(buf, r.keys.at(r.succIdx))
 		n := copy(buf[KeySize:], r.keys.slice(r.stabIdx, nkeys))
 		copy(buf[KeySize+n:], r.keys)
-		r.stabIdx = (r.stabIdx + r.stabilizerCount) % nkeys
+		r.stabIdx += r.stabilizerCount
 	}
 
 	r.mtx.RUnlock()

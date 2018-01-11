@@ -3,20 +3,9 @@ package flow
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 )
-
-func TestKeyString(t *testing.T) {
-	k := intKey(7)
-	if s := k.String(); s != "0000000000000000000000000000000000000007" {
-		t.Fatalf("unexpected key representation: %s", s)
-	}
-
-	key := Key(k.array())
-	if s := key.String(); s != "0000000000000000000000000000000000000007" {
-		t.Fatalf("unexpected key representation: %s", s)
-	}
-}
 
 func TestKeyFromBytes(t *testing.T) {
 	_, err := keyFromBytes(nil)
@@ -30,7 +19,7 @@ func TestKeyFromBytes(t *testing.T) {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !k.equal(key7):
-		t.Fatalf("unexpected key: %s", k.String())
+		t.Fatalf("unexpected key: %s", printableKey(k))
 	}
 }
 
@@ -53,7 +42,7 @@ func TestKeyClone(t *testing.T) {
 	case &k1[0] == &k2[0]:
 		t.Fatalf("expected to be different: %p and %p", k1, k2)
 	case !k1.equal(k2):
-		t.Fatalf("expected to be equal: %s and %s", k1.String(), k2.String())
+		t.Fatalf("expected to be equal: %s and %s", printableKey(k1), printableKey(k2))
 	}
 }
 
@@ -65,17 +54,17 @@ func TestKeyBetween(t *testing.T) {
 	k3 := keys.at(2)
 	switch {
 	case k1.between(k2, k3):
-		t.Fatalf("%s in (%s,%s]", k1.String(), k2.String(), k3.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k1), printableKey(k2), printableKey(k3))
 	case k3.between(k1, k2):
-		t.Fatalf("%s in (%s,%s]", k3.String(), k1.String(), k2.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k3), printableKey(k1), printableKey(k2))
 	case k2.between(k3, k1):
-		t.Fatalf("%s in (%s,%s]", k2.String(), k3.String(), k1.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k2), printableKey(k3), printableKey(k1))
 	case !k3.between(k2, k1):
-		t.Fatalf("%s not in (%s,%s]", k3.String(), k2.String(), k1.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k3), printableKey(k2), printableKey(k1))
 	case !k1.between(k3, k2):
-		t.Fatalf("%s not in (%s,%s]", k3.String(), k2.String(), k1.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k3), printableKey(k2), printableKey(k1))
 	case !k2.between(k1, k3):
-		t.Fatalf("%s not in (%s,%s]", k2.String(), k1.String(), k3.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k2), printableKey(k1), printableKey(k3))
 	}
 
 	k1 = keys.at(3)
@@ -83,17 +72,17 @@ func TestKeyBetween(t *testing.T) {
 	k3 = keys.at(5)
 	switch {
 	case k1.between(k2, k3):
-		t.Fatalf("%s in (%s,%s]", k1.String(), k2.String(), k3.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k1), printableKey(k2), printableKey(k3))
 	case k3.between(k1, k2):
-		t.Fatalf("%s in (%s,%s]", k3.String(), k1.String(), k2.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k3), printableKey(k1), printableKey(k2))
 	case k2.between(k3, k1):
-		t.Fatalf("%s in (%s,%s]", k2.String(), k3.String(), k1.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k2), printableKey(k3), printableKey(k1))
 	case !k3.between(k2, k1):
-		t.Fatalf("%s not in (%s,%s]", k3.String(), k2.String(), k1.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k3), printableKey(k2), printableKey(k1))
 	case !k1.between(k3, k2):
-		t.Fatalf("%s not in (%s,%s]", k3.String(), k2.String(), k1.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k3), printableKey(k2), printableKey(k1))
 	case !k2.between(k1, k3):
-		t.Fatalf("%s not in (%s,%s]", k2.String(), k1.String(), k3.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k2), printableKey(k1), printableKey(k3))
 	}
 
 	k1 = keys.at(6)
@@ -101,17 +90,17 @@ func TestKeyBetween(t *testing.T) {
 	k3 = keys.at(8)
 	switch {
 	case k1.between(k2, k3):
-		t.Fatalf("%s in (%s,%s]", k1.String(), k2.String(), k3.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k1), printableKey(k2), printableKey(k3))
 	case k3.between(k1, k2):
-		t.Fatalf("%s in (%s,%s]", k3.String(), k1.String(), k2.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k3), printableKey(k1), printableKey(k2))
 	case k2.between(k3, k1):
-		t.Fatalf("%s in (%s,%s]", k2.String(), k3.String(), k1.String())
+		t.Fatalf("%s in (%s,%s]", printableKey(k2), printableKey(k3), printableKey(k1))
 	case !k3.between(k2, k1):
-		t.Fatalf("%s not in (%s,%s]", k3.String(), k2.String(), k1.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k3), printableKey(k2), printableKey(k1))
 	case !k1.between(k3, k2):
-		t.Fatalf("%s not in (%s,%s]", k3.String(), k2.String(), k1.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k3), printableKey(k2), printableKey(k1))
 	case !k2.between(k1, k3):
-		t.Fatalf("%s not in (%s,%s]", k2.String(), k1.String(), k3.String())
+		t.Fatalf("%s not in (%s,%s]", printableKey(k2), printableKey(k1), printableKey(k3))
 	}
 }
 
@@ -162,7 +151,7 @@ func TestKeysAt(t *testing.T) {
 	keys := intKeys(1, 2, 3)
 	for i := 0; i < 3; i++ {
 		if k := keys.at(i); !k.equal(intKey(i + 1)) {
-			t.Fatalf("unexpected key at %d: %s", i, k.String())
+			t.Fatalf("unexpected key at %d: %s", i, printableKey(k))
 		}
 	}
 }
@@ -191,7 +180,7 @@ func TestRingAt(t *testing.T) {
 	r := ring(intKeys(1, 2, 3))
 	for i := 0; i < 3; i++ {
 		if k := r.at(i); !k.equal(intKey(i + 1)) {
-			t.Fatalf("unexpected key at %d: %s", i, k.String())
+			t.Fatalf("unexpected key at %d: %s", i, printableKey(k))
 		}
 	}
 }
@@ -371,6 +360,18 @@ func intKeys(ns ...int) keys {
 	return k
 }
 
+type printableKey key
+
+func (k printableKey) String() string {
+	var buf [2 * KeySize]byte
+	hex.Encode(buf[:], k)
+	return string(buf[:])
+}
+
+func (k printableKey) GoString() string {
+	return k.String()
+}
+
 type printableKeys keys
 
 func (k printableKeys) String() string {
@@ -379,7 +380,7 @@ func (k printableKeys) String() string {
 	keys := keys(k)
 	if nkeys := keys.length(); nkeys != 0 {
 		for i := 0; i < nkeys; i++ {
-			buf.WriteString(keys.at(i).String())
+			buf.WriteString(printableKey(keys.at(i)).String())
 			buf.WriteString(", ")
 		}
 		buf.Truncate(buf.Len() - 2) // trim last comma + whitespace

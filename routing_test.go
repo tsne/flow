@@ -221,7 +221,7 @@ func TestRoutingTableStabilizers(t *testing.T) {
 		t.Fatalf("unexpected number of stabilizers: %d", stabilizers.length())
 	case !stabilizers.at(0).equal(r.keys.at(r.succIdx)) || !stabilizers.at(1).equal(keys.at(2)) || !stabilizers.at(2).equal(keys.at(3)):
 		t.Fatalf("unexpected stabilizers: %v", printableKeys(stabilizers))
-	case r.stabIdx != 0:
+	case r.stabIdx != 4:
 		t.Fatalf("unexpected stabilizer index: %d", r.stabIdx)
 	}
 }
@@ -232,7 +232,7 @@ func TestRoutingTableSuccessor(t *testing.T) {
 	r := routingTable{}
 	succ := r.successor(key5, nil)
 	if len(succ) != 0 {
-		t.Fatalf("unexpected successor: %s", succ.String())
+		t.Fatalf("unexpected successor: %s", printableKey(succ))
 	}
 
 	r = routingTable{
@@ -244,6 +244,6 @@ func TestRoutingTableSuccessor(t *testing.T) {
 	case len(succ) == 0:
 		t.Fatal("non-local successor expected")
 	case !succ.equal(r.keys.at(0)):
-		t.Fatalf("unexpected successor: %s", succ.String())
+		t.Fatalf("unexpected successor: %s", printableKey(succ))
 	}
 }

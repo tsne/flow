@@ -25,7 +25,9 @@ func StringKey(s string) Key {
 
 // String returns a string representation of the key.
 func (k Key) String() string {
-	return key(k[:]).String()
+	var buf [2 * KeySize]byte
+	hex.Encode(buf[:], k[:])
+	return string(buf[:])
 }
 
 type key []byte
@@ -35,12 +37,6 @@ func keyFromBytes(p []byte) (key, error) {
 		return nil, errMalformedKey
 	}
 	return key(p), nil
-}
-
-func (k key) String() string {
-	var buf [2 * KeySize]byte
-	hex.Encode(buf[:], k[:])
-	return string(buf[:])
 }
 
 func (k key) equal(other key) bool {
@@ -54,11 +50,9 @@ func (k key) array() [KeySize]byte {
 }
 
 func (k key) clone(buf key) key {
-	if cap(buf) < KeySize {
-		buf = make(key, KeySize)
-	}
+	buf = alloc(KeySize, buf)
 	copy(buf, k)
-	return buf[:KeySize]
+	return buf
 }
 
 // check if k is in (lower,upper]
@@ -72,11 +66,7 @@ func (k key) between(lower, upper key) bool {
 type keys []byte
 
 func makeKeys(n int, buf keys) keys {
-	n *= KeySize
-	if n <= cap(buf) {
-		return buf[:n]
-	}
-	return make(keys, n)
+	return alloc(n*KeySize, buf)
 }
 
 func keysFromBytes(p []byte) (keys, error) {
@@ -117,7 +107,7 @@ func (r ring) slice(start, end int) ring {
 func (r *ring) reserve(newcap int) {
 	newcap *= KeySize
 	if cap(*r) < newcap {
-		res := make(ring, len(*r), newcap)
+		res := alloc(newcap, nil)[:len(*r)]
 		copy(res, *r)
 		*r = res
 	}
