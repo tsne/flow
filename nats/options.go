@@ -61,10 +61,10 @@ func Reconnects(count int, interval time.Duration) Option {
 }
 
 // Credentials sets the credentials which should be used for a server
-// connection. If the given credentials are of the form "user:password"
+// connection. If the given credentials are of the form "user:password",
 // an user/password pair will be configured. Otherwise a security token
-// is set. This option can be set twice, once for the user/password pair
-// and once for the token.
+// is set. This option can be used twice, for the user/password pair
+// and for the token.
 func Credentials(cred string) Option {
 	return func(o *nats.Options) error {
 		if cred == "" {
@@ -72,16 +72,8 @@ func Credentials(cred string) Option {
 		}
 
 		if idx := strings.IndexByte(cred, ':'); idx < 0 {
-			// token
-			if o.Token != "" {
-				return optionError("token credential already specified")
-			}
 			o.Token = cred
 		} else {
-			// user:password
-			if o.User != "" || o.Password != "" {
-				return optionError("user/password credentials already specified")
-			}
 			o.User = cred[:idx]
 			o.Password = cred[idx+1:]
 		}

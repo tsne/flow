@@ -3,6 +3,7 @@ package flow
 import "fmt"
 
 const (
+	errClosing       = errorString("closing")
 	errRespTimeout   = errorString("response timeout")
 	errMalformedKey  = errorString("malformed key")
 	errMalformedKeys = errorString("malformed keys")

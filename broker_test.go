@@ -67,6 +67,47 @@ func TestNewBroker(t *testing.T) {
 	}
 }
 
+func TestBrokerClose(t *testing.T) {
+	errch := make(chan error, 1)
+	rec := newPubsubRecorder()
+	b := &Broker{
+		pubsub: newPubSub(rec, defaultOptions()),
+		pendingResps: map[uint64]pendingResp{
+			1: {
+				timer: time.AfterFunc(time.Second, func() { t.Fatalf("response timeout") }),
+				errch: errch,
+			},
+		},
+		closing: make(chan struct{}),
+	}
+
+	var (
+		wg        sync.WaitGroup
+		closeErr  error
+		published message
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		closeErr = b.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		published = <-rec.pubchan(b.pubsub.groupName)
+	}()
+	wg.Wait()
+
+	if closeErr != nil {
+		t.Fatalf("unexpected close error: %v", closeErr)
+	}
+	if published.typ() != msgTypeLeave {
+		t.Fatalf("unexpected message type: %s", published.typ())
+	}
+	if err := <-errch; err != errClosing {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestBrokerPublish(t *testing.T) {
 	rec := newPubsubRecorder()
 	store := newStoreRecorder()
@@ -257,7 +298,10 @@ func TestBrokerHandleInfo(t *testing.T) {
 	b := &Broker{
 		routing: newRoutingTable(opts),
 		pendingResps: map[uint64]pendingResp{
-			1: {timer: time.AfterFunc(time.Second, func() { t.Fatalf("response timeout") })},
+			1: {
+				timer: time.AfterFunc(time.Second, func() { t.Fatalf("response timeout") }),
+				errch: make(chan error, 1),
+			},
 		},
 	}
 
@@ -613,6 +657,8 @@ func TestBrokerStabilize(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < len(msgs); i++ {
 			msgs[i] = <-rec.pubchan("group.0000000000000000000000000000000000000002")
+			// The generated response ids are just incremented, starting with 1.
+			b.notifyResp(uint64(i+1), nil)
 		}
 		close(b.closing)
 	}()
@@ -625,9 +671,9 @@ func TestBrokerStabilize(t *testing.T) {
 
 		ping, err := unmarshalPing(msg)
 		if err != nil {
-			t.Fatalf("unexpected error at %d: %v", i, err)
+			t.Errorf("unexpected error at %d: %v", i, err)
 		} else if ping.id == 0 || !ping.sender.equal(b.routing.local) {
-			t.Fatalf("unexpected ping message at %d: %+v", i, ping)
+			t.Errorf("unexpected ping message at %d: %+v", i, ping)
 		}
 	}
 }

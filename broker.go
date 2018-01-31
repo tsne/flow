@@ -89,10 +89,24 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 func (b *Broker) Close() error {
 	close(b.closing)
 
+	// send leave message
 	leave := marshalLeave(leave{node: b.routing.local}, nil)
 	if err := b.pubsub.sendToGroup(leave); err != nil {
 		logf("group broadcast error: %v", err)
 	}
+
+	// cancel pending responses
+	b.pendingMtx.Lock()
+	rids := make([]uint64, 0, len(b.pendingResps))
+	for rid := range b.pendingResps {
+		rids = append(rids, rid)
+	}
+	b.pendingMtx.Unlock()
+	for _, rid := range rids {
+		b.notifyResp(rid, errClosing)
+	}
+
+	// shutdown pub/sub
 	b.pubsub.shutdown()
 
 	b.wg.Wait()
@@ -167,7 +181,7 @@ func (b *Broker) processSub(stream string, data []byte) {
 
 	pub, err := unmarshalPub(msg)
 	if err != nil {
-		logf("published message error: %v", err)
+		logf("pub unmarshal error: %v", err)
 		return
 	}
 
@@ -205,7 +219,11 @@ func (b *Broker) processSub(stream string, data []byte) {
 
 		if len(fwdmsg) == 0 {
 			rid = b.nextRespID()
-			errch = make(chan error)
+			// We need a buffered channel here, because of the error
+			// handling below. If sending the message to the successor
+			// fails, notifyResp must not block while writing the error
+			// to the channel.
+			errch = make(chan error, 1)
 			fwdmsg = marshalFwd(fwd{
 				id:     rid,
 				origin: b.routing.local,
@@ -216,7 +234,9 @@ func (b *Broker) processSub(stream string, data []byte) {
 		}
 
 		b.awaitResp(succ, rid, errch)
-		b.sendTo(succ, fwdmsg)
+		if err := b.pubsub.sendToNode(succ, fwdmsg); err != nil {
+			b.notifyResp(rid, err)
+		}
 		if err := <-errch; err != nil {
 			if err == errRespTimeout {
 				// The node was suspected and removed from the
@@ -347,9 +367,7 @@ func (b *Broker) notifyResp(rid uint64, err error) {
 	if err == errRespTimeout {
 		b.routing.suspect(resp.receiver)
 	}
-	if resp.errch != nil {
-		resp.errch <- err
-	}
+	resp.errch <- err
 }
 
 func (b *Broker) sendTo(target key, msg message) {
@@ -370,8 +388,10 @@ func (b *Broker) stabilize(interval time.Duration) {
 	defer ticker.Stop()
 
 	var (
-		msg   message
-		stabs keys
+		msg    message
+		stabs  keys
+		nstabs int
+		errch  chan error
 	)
 	for {
 		select {
@@ -381,12 +401,26 @@ func (b *Broker) stabilize(interval time.Duration) {
 		}
 
 		stabs = b.routing.stabilizers(stabs)
+		nstabs = stabs.length()
+		if cap(errch) < nstabs {
+			errch = make(chan error, nstabs)
+		}
+
 		for i, n := 0, stabs.length(); i < n; i++ {
 			key := stabs.at(i)
 			ping.id = b.nextRespID()
 			msg = marshalPing(ping, msg)
-			if b.pubsub.sendToNode(key, msg) == nil {
-				b.awaitResp(key, ping.id, nil)
+
+			b.awaitResp(key, ping.id, errch)
+			if err := b.pubsub.sendToNode(key, msg); err != nil {
+				b.notifyResp(ping.id, err)
+			}
+		}
+
+		// consume errors
+		for i := 0; i < nstabs; i++ {
+			if err := <-errch; err != nil && err != errClosing {
+				logf("stabilization error: %v", err)
 			}
 		}
 	}

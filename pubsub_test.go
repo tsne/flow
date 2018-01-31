@@ -110,6 +110,12 @@ func TestPubSubSubscribeGroup(t *testing.T) {
 	case s.group != "":
 		t.Fatalf("unexpected subscription group: %s", s.group)
 	}
+
+	// try to subscribe to the group again
+	err = ps.subscribeGroup(func(stream string, data []byte) {})
+	if err == nil || err.Error() != "already subscribed to group 'group'" {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestPubSubSubscribe(t *testing.T) {
@@ -135,6 +141,12 @@ func TestPubSubSubscribe(t *testing.T) {
 	case s.group != "group":
 		t.Fatalf("unexpected subscription group: %s", s.group)
 	}
+
+	// try to subscribe to the same stream again
+	err = ps.subscribe("stream", func(stream string, data []byte) {})
+	if err == nil || err.Error() != "already subscribed to 'stream'" {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestPubSubShutdown(t *testing.T) {
@@ -157,6 +169,7 @@ func TestPubSubShutdown(t *testing.T) {
 type subscription struct {
 	group       string
 	handler     PubSubHandler
+	subscribers int // number of subscribers
 	unsubscribe func() error
 }
 
@@ -189,15 +202,17 @@ func (r *pubsubRecorder) Subscribe(stream, group string, h PubSubHandler) (Subsc
 	r.subMtx.Lock()
 	defer r.subMtx.Unlock()
 
-	if _, has := r.subs[stream]; has {
-		return nil, errorString("already subscribed")
+	sub, has := r.subs[stream]
+	if !has {
+		sub = &subscription{
+			group:       group,
+			handler:     h,
+			unsubscribe: func() error { return r.unsubscribe(stream) },
+		}
+		r.subs[stream] = sub
 	}
-	sub := &subscription{
-		group:       group,
-		handler:     h,
-		unsubscribe: func() error { return r.unsubscribe(stream) },
-	}
-	r.subs[stream] = sub
+
+	sub.subscribers++
 	return sub, nil
 }
 
@@ -217,10 +232,15 @@ func (r *pubsubRecorder) unsubscribe(stream string) error {
 	r.subMtx.Lock()
 	defer r.subMtx.Unlock()
 
-	if _, has := r.subs[stream]; !has {
+	sub, has := r.subs[stream]
+	if !has {
 		return errorString("not subscribed")
 	}
-	delete(r.subs, stream)
+
+	sub.subscribers--
+	if sub.subscribers == 0 {
+		delete(r.subs, stream)
+	}
 	return nil
 }
 
