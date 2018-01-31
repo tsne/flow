@@ -47,17 +47,17 @@ func newPubSub(ps PubSub, opts options) pubsub {
 	}
 }
 
-func (ps *pubsub) sendToGroup(msg message) error {
-	return ps.PubSub.Publish(ps.groupName, msg)
+func (ps *pubsub) sendToGroup(frame frame) error {
+	return ps.PubSub.Publish(ps.groupName, frame)
 }
 
-func (ps *pubsub) sendToNode(target key, msg message) error {
+func (ps *pubsub) sendToNode(target key, frame frame) error {
 	stream := nodeName(ps.groupName, target)
-	return ps.PubSub.Publish(stream, msg)
+	return ps.PubSub.Publish(stream, frame)
 }
 
-func (ps *pubsub) publish(stream string, msg message) error {
-	return ps.PubSub.Publish(stream, msg)
+func (ps *pubsub) publish(stream string, frame frame) error {
+	return ps.PubSub.Publish(stream, frame)
 }
 
 func (ps *pubsub) subscribeGroup(h PubSubHandler) error {

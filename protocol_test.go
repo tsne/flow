@@ -6,61 +6,61 @@ import (
 	"time"
 )
 
-func TestMsgTypeString(t *testing.T) {
-	msgTypeStrings := map[msgType]string{
-		msgTypeJoin:  "JOIN",
-		msgTypeLeave: "LEAV",
-		msgTypeInfo:  "INFO",
-		msgTypePing:  "PING",
-		msgTypeFwd:   "FWD",
-		msgTypeAck:   "ACK",
-		msgTypePub:   "PUB",
+func TestFrameTypeString(t *testing.T) {
+	frameTypeStrings := map[frameType]string{
+		frameTypeJoin:  "JOIN",
+		frameTypeLeave: "LEAV",
+		frameTypeInfo:  "INFO",
+		frameTypePing:  "PING",
+		frameTypeFwd:   "FWD",
+		frameTypeAck:   "ACK",
+		frameTypePub:   "PUB",
 	}
 
-	for typ, str := range msgTypeStrings {
+	for typ, str := range frameTypeStrings {
 		if s := typ.String(); s != str {
-			t.Fatalf("unexpected string representation for %s: %s", str, s)
+			t.Errorf("unexpected string representation for %s: %s", str, s)
 		}
 	}
 }
 
-func TestMessageFromBytes(t *testing.T) {
-	_, err := messageFromBytes(nil)
-	if err != errMalformedMessage {
+func TestFrameFromBytes(t *testing.T) {
+	_, err := frameFromBytes(nil)
+	if err != errMalformedFrame {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	msg, err := messageFromBytes(make([]byte, headerLen))
+	frame, err := frameFromBytes(make([]byte, headerLen))
 	switch {
 	case err != nil:
-		t.Fatalf("unexpected error: %v", err)
-	case len(msg) != headerLen:
-		t.Fatalf("unexpected length of message: %d", len(msg))
+		t.Errorf("unexpected error: %v", err)
+	case len(frame) != headerLen:
+		t.Errorf("unexpected frame length: %d", len(frame))
 	}
 }
 
-func TestMessageTyp(t *testing.T) {
-	msg := message("....LEAV....")
-	if msg.typ() != msgTypeLeave {
-		t.Fatalf("unexpected message type: %s", msg.typ())
+func TestFrameTyp(t *testing.T) {
+	frame := frame("....LEAV....")
+	if frame.typ() != frameTypeLeave {
+		t.Errorf("unexpected frame type: %s", frame.typ())
 	}
 }
 
-func TestMessagePayload(t *testing.T) {
-	msg := message{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 'p', 'a', 'y', 'l', 'o', 'a', 'd', '1'}
-	if p := msg.payload(); string(p) != "payload" {
-		t.Fatalf("unexpected message payload: %s", p)
+func TestFramePayload(t *testing.T) {
+	frame := frame{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 'p', 'a', 'y', 'l', 'o', 'a', 'd', '1'}
+	if p := frame.payload(); string(p) != "payload" {
+		t.Errorf("unexpected frame payload: %s", p)
 	}
 }
 
-func TestMessageReset(t *testing.T) {
-	var msg message
-	msg.reset(msgTypeJoin, 7)
+func TestFrameReset(t *testing.T) {
+	var frame frame
+	frame.reset(frameTypeJoin, 7)
 	switch {
-	case msg.typ() != msgTypeJoin:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != 7:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypeJoin:
+		t.Errorf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != 7:
+		t.Errorf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 }
 
@@ -69,20 +69,20 @@ func TestMarshalJoin(t *testing.T) {
 		sender: intKey(7),
 	}
 
-	msg := marshalJoin(join, nil)
+	frame := marshalJoin(join, nil)
 	switch {
-	case msg.typ() != msgTypeJoin:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != KeySize:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypeJoin:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != KeySize:
+		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err := unmarshalJoin(msg)
+	unmarshalled, err := unmarshalJoin(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !reflect.DeepEqual(join, unmarshalled):
-		t.Fatalf("unexpected join message: %#v", unmarshalled)
+		t.Fatalf("unexpected join frame: %#v", unmarshalled)
 	}
 }
 
@@ -91,20 +91,20 @@ func TestMarshalLeave(t *testing.T) {
 		node: intKey(7),
 	}
 
-	msg := marshalLeave(leave, nil)
+	frame := marshalLeave(leave, nil)
 	switch {
-	case msg.typ() != msgTypeLeave:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != KeySize:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypeLeave:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != KeySize:
+		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err := unmarshalLeave(msg)
+	unmarshalled, err := unmarshalLeave(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !reflect.DeepEqual(leave, unmarshalled):
-		t.Fatalf("unexpected leave message: %#v", unmarshalled)
+		t.Fatalf("unexpected leave frame: %#v", unmarshalled)
 	}
 }
 
@@ -114,20 +114,20 @@ func TestMarshalInfo(t *testing.T) {
 		neighbors: intKeys(1, 2, 3, 4),
 	}
 
-	msg := marshalInfo(info, nil)
+	frame := marshalInfo(info, nil)
 	switch {
-	case msg.typ() != msgTypeInfo:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != 8+4*KeySize:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypeInfo:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != 8+4*KeySize:
+		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err := unmarshalInfo(msg)
+	unmarshalled, err := unmarshalInfo(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !reflect.DeepEqual(info, unmarshalled):
-		t.Fatalf("unexpected info message: %#v", unmarshalled)
+		t.Fatalf("unexpected info frame: %#v", unmarshalled)
 	}
 }
 
@@ -137,20 +137,20 @@ func TestMarshalPing(t *testing.T) {
 		sender: intKey(1),
 	}
 
-	msg := marshalPing(ping, nil)
+	frame := marshalPing(ping, nil)
 	switch {
-	case msg.typ() != msgTypePing:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != 8+KeySize:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypePing:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != 8+KeySize:
+		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err := unmarshalPing(msg)
+	unmarshalled, err := unmarshalPing(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !reflect.DeepEqual(ping, unmarshalled):
-		t.Fatalf("unexpected ping message: %#v", unmarshalled)
+		t.Fatalf("unexpected ping frame: %#v", unmarshalled)
 	}
 }
 
@@ -160,39 +160,39 @@ func TestMarshalAck(t *testing.T) {
 		err: ackError("error text"),
 	}
 
-	msg := marshalAck(ack, nil)
+	frame := marshalAck(ack, nil)
 	switch {
-	case msg.typ() != msgTypeAck:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != 18:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypeAck:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != 18:
+		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err := unmarshalAck(msg)
+	unmarshalled, err := unmarshalAck(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !reflect.DeepEqual(ack, unmarshalled):
-		t.Fatalf("unexpected ack message: %#v", unmarshalled)
+		t.Fatalf("unexpected ack frame: %#v", unmarshalled)
 	}
 
 	// no error
 	ack.err = nil
 
-	msg = marshalAck(ack, nil)
+	frame = marshalAck(ack, nil)
 	switch {
-	case msg.typ() != msgTypeAck:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != 8:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypeAck:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != 8:
+		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err = unmarshalAck(msg)
+	unmarshalled, err = unmarshalAck(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !reflect.DeepEqual(ack, unmarshalled):
-		t.Fatalf("unexpected ack message: %#v", unmarshalled)
+		t.Fatalf("unexpected ack frame: %#v", unmarshalled)
 	}
 }
 
@@ -204,20 +204,20 @@ func TestMarshalPub(t *testing.T) {
 		payload:      []byte("payload"),
 	}
 
-	msg := marshalPub(pub, nil)
+	frame := marshalPub(pub, nil)
 	switch {
-	case msg.typ() != msgTypePub:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != 49:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypePub:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != 49:
+		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err := unmarshalPub(msg)
+	unmarshalled, err := unmarshalPub(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !reflect.DeepEqual(pub, unmarshalled):
-		t.Fatalf("unexpected pub message: %#v", unmarshalled)
+		t.Fatalf("unexpected pub frame: %#v", unmarshalled)
 	}
 }
 
@@ -236,19 +236,19 @@ func TestMarshalFwd(t *testing.T) {
 		},
 	}
 
-	msg := marshalFwd(fwd, nil)
+	frame := marshalFwd(fwd, nil)
 	switch {
-	case msg.typ() != msgTypeFwd:
-		t.Fatalf("unexpected message type: %s", msg.typ())
-	case len(msg.payload()) != 67+2*KeySize:
-		t.Fatalf("unexpected message payload length: %d", len(msg.payload()))
+	case frame.typ() != frameTypeFwd:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
+	case len(frame.payload()) != 67+2*KeySize:
+		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err := unmarshalFwd(msg)
+	unmarshalled, err := unmarshalFwd(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !reflect.DeepEqual(fwd, unmarshalled):
-		t.Fatalf("unexpected fwd message: %#v", unmarshalled)
+		t.Fatalf("unexpected fwd frame: %#v", unmarshalled)
 	}
 }

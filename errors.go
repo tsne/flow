@@ -8,14 +8,14 @@ const (
 	errMalformedKey  = errorString("malformed key")
 	errMalformedKeys = errorString("malformed keys")
 
-	errMalformedMessage = protocolError("malformed message")
-	errMalformedJoin    = protocolError("malformed join")
-	errMalformedLeave   = protocolError("malformed leave")
-	errMalformedInfo    = protocolError("malformed info")
-	errMalformedPing    = protocolError("malformed ping")
-	errMalformedAck     = protocolError("malformed ack")
-	errMalformedPub     = protocolError("malformed pub")
-	errMalformedFwd     = protocolError("malformed fwd")
+	errMalformedFrame = protocolError("malformed frame")
+	errMalformedJoin  = protocolError("malformed join")
+	errMalformedLeave = protocolError("malformed leave")
+	errMalformedInfo  = protocolError("malformed info")
+	errMalformedPing  = protocolError("malformed ping")
+	errMalformedAck   = protocolError("malformed ack")
+	errMalformedPub   = protocolError("malformed pub")
+	errMalformedFwd   = protocolError("malformed fwd")
 )
 
 type errorString string

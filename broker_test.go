@@ -12,10 +12,10 @@ func TestNewBroker(t *testing.T) {
 	rec := newPubsubRecorder()
 
 	var (
-		b   *Broker
-		err error
-		wg  sync.WaitGroup
-		msg message
+		b     *Broker
+		err   error
+		wg    sync.WaitGroup
+		frame frame
 	)
 	wg.Add(2)
 	go func() {
@@ -24,7 +24,7 @@ func TestNewBroker(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-rec.pubchan("group")
+		frame = <-rec.pubchan("group")
 	}()
 	wg.Wait()
 
@@ -34,7 +34,7 @@ func TestNewBroker(t *testing.T) {
 	case b.ackTimeout <= 0:
 		t.Fatalf("unexpected ack timeout: %v", b.ackTimeout)
 	case b.respID != 0:
-		t.Fatalf("unexpected message id: %d", b.respID)
+		t.Fatalf("unexpected frame id: %d", b.respID)
 	case b.closing == nil:
 		t.Fatal("no closing channel")
 	case b.pendingResps == nil:
@@ -45,10 +45,10 @@ func TestNewBroker(t *testing.T) {
 		t.Fatal("no handler map")
 	case len(b.handlers) != 0:
 		t.Fatalf("unexpected number of handlers: %d", len(b.handlers))
-	case len(msg) == 0:
-		t.Fatalf("unexpected message length: %d", len(msg))
-	case msg.typ() != msgTypeJoin:
-		t.Fatalf("unexpected message type: %s", msg.typ())
+	case len(frame) == 0:
+		t.Fatalf("unexpected frame length: %d", len(frame))
+	case frame.typ() != frameTypeJoin:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
 	}
 
 	wg.Add(1)
@@ -56,14 +56,14 @@ func TestNewBroker(t *testing.T) {
 		defer wg.Done()
 		err = b.Close()
 	}()
-	msg = <-rec.pubchan("group")
+	frame = <-rec.pubchan("group")
 	wg.Wait()
 
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
-	case msg.typ() != msgTypeLeave:
-		t.Fatalf("unexpected message type: %s", msg.typ())
+	case frame.typ() != frameTypeLeave:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
 	}
 }
 
@@ -84,7 +84,7 @@ func TestBrokerClose(t *testing.T) {
 	var (
 		wg        sync.WaitGroup
 		closeErr  error
-		published message
+		published frame
 	)
 	wg.Add(2)
 	go func() {
@@ -100,8 +100,8 @@ func TestBrokerClose(t *testing.T) {
 	if closeErr != nil {
 		t.Fatalf("unexpected close error: %v", closeErr)
 	}
-	if published.typ() != msgTypeLeave {
-		t.Fatalf("unexpected message type: %s", published.typ())
+	if published.typ() != frameTypeLeave {
+		t.Fatalf("unexpected frame type: %s", published.typ())
 	}
 	if err := <-errch; err != errClosing {
 		t.Fatalf("unexpected error: %v", err)
@@ -131,7 +131,7 @@ func TestBrokerPublish(t *testing.T) {
 	var (
 		wg        sync.WaitGroup
 		err       error
-		published message
+		published frame
 	)
 	wg.Add(2)
 	go func() {
@@ -151,8 +151,8 @@ func TestBrokerPublish(t *testing.T) {
 		t.Fatalf("unexpected number of store messages: %d", store.countMessages())
 	case !reflect.DeepEqual(*store.message(0), msg):
 		t.Fatalf("unexpected store message: %+v", store.message(0))
-	case published.typ() != msgTypePub:
-		t.Fatalf("unexpected message type: %s", published.typ())
+	case published.typ() != frameTypePub:
+		t.Fatalf("unexpected frame type: %s", published.typ())
 	}
 
 	pub, err := unmarshalPub(published)
@@ -160,7 +160,7 @@ func TestBrokerPublish(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !bytes.Equal(pub.source, msg.Source) || !pub.time.Equal(msg.Time) || !bytes.Equal(pub.partitionKey, msg.PartitionKey) || !bytes.Equal(pub.payload, msg.Data) {
-		t.Fatalf("unexpected pub message: %+v", pub)
+		t.Fatalf("unexpected pub frame: %+v", pub)
 	}
 }
 
@@ -240,8 +240,8 @@ func TestBrokerHandleJoin(t *testing.T) {
 	}
 
 	var (
-		wg  sync.WaitGroup
-		msg message
+		wg    sync.WaitGroup
+		frame frame
 	)
 	wg.Add(2)
 	go func() {
@@ -250,7 +250,7 @@ func TestBrokerHandleJoin(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-rec.pubchan("group.0000000000000000000000000000000000000002")
+		frame = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 	}()
 	wg.Wait()
 
@@ -259,11 +259,11 @@ func TestBrokerHandleJoin(t *testing.T) {
 		t.Fatalf("unexpected number of keys: %d", b.routing.keys.length())
 	case !b.routing.keys.at(0).equal(join.sender):
 		t.Fatalf("unexpected keys: %v", printableKeys(b.routing.keys))
-	case msg.typ() != msgTypeInfo:
-		t.Fatalf("unexpected message type: %s", msg.typ())
+	case frame.typ() != frameTypeInfo:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
 	}
 
-	info, err := unmarshalInfo(msg)
+	info, err := unmarshalInfo(frame)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	} else if info.neighbors.length() == 0 {
@@ -337,8 +337,8 @@ func TestBrokerHandlePing(t *testing.T) {
 	}
 
 	var (
-		wg  sync.WaitGroup
-		msg message
+		wg    sync.WaitGroup
+		frame frame
 	)
 	wg.Add(2)
 	go func() {
@@ -347,15 +347,15 @@ func TestBrokerHandlePing(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-rec.pubchan("group.0000000000000000000000000000000000000002")
+		frame = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 	}()
 	wg.Wait()
 
-	if msg.typ() != msgTypeInfo {
-		t.Fatalf("unexpected message type: %s", msg.typ())
+	if frame.typ() != frameTypeInfo {
+		t.Fatalf("unexpected frame type: %s", frame.typ())
 	}
 
-	info, err := unmarshalInfo(msg)
+	info, err := unmarshalInfo(frame)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	} else if info.neighbors.length() == 0 {
@@ -409,8 +409,8 @@ func TestBrokerHandleFwd(t *testing.T) {
 	}
 
 	var (
-		wg  sync.WaitGroup
-		msg message
+		wg    sync.WaitGroup
+		frame frame
 	)
 	wg.Add(2)
 	go func() {
@@ -419,7 +419,7 @@ func TestBrokerHandleFwd(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-rec.pubchan("group.0000000000000000000000000000000000000002")
+		frame = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 	}()
 	wg.Wait()
 
@@ -427,11 +427,11 @@ func TestBrokerHandleFwd(t *testing.T) {
 	switch {
 	case !handlerCalled:
 		t.Fatal("expected handler to be called")
-	case msg.typ() != msgTypeAck:
-		t.Fatalf("unexpected message type: %s", msg.typ())
+	case frame.typ() != frameTypeAck:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
 	}
 
-	ack, err := unmarshalAck(msg)
+	ack, err := unmarshalAck(frame)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	} else if ack.id != fwd.id {
@@ -443,25 +443,25 @@ func TestBrokerHandleFwd(t *testing.T) {
 	// forward again
 	rec.clear()
 	handlerCalled = false
-	fwdmsg := marshalFwd(fwd, nil)
+	fwdframe := marshalFwd(fwd, nil)
 	b.routing.register(keys)
 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processGroupSubs("stream", fwdmsg)
+		b.processGroupSubs("stream", fwdframe)
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-rec.pubchan("group.0000000000000000000000000000000000000003")
+		frame = <-rec.pubchan("group.0000000000000000000000000000000000000003")
 	}()
 	wg.Wait()
 
 	switch {
 	case handlerCalled:
 		t.Fatal("unexpected handler call")
-	case !bytes.Equal(msg, fwdmsg):
-		t.Fatalf("unexpected fwd message: %v", msg)
+	case !bytes.Equal(frame, fwdframe):
+		t.Fatalf("unexpected fwd frame: %v", frame)
 	}
 }
 
@@ -573,16 +573,16 @@ func TestBrokerProcessSub(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg := <-rec.pubchan("group." + pkey.String())
-		if msg.typ() != msgTypeFwd {
-			t.Fatalf("unexpected message type: %s", msg.typ())
+		frame := <-rec.pubchan("group." + pkey.String())
+		if frame.typ() != frameTypeFwd {
+			t.Fatalf("unexpected frame type: %s", frame.typ())
 		}
 
-		fwd, err := unmarshalFwd(msg)
+		fwd, err := unmarshalFwd(frame)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || fwd.stream != "stream" || !bytes.Equal(fwd.partitionKey, pub.partitionKey) || !bytes.Equal(fwd.payload, pub.payload) {
-			t.Fatalf("unexpected fwd message: %+v", fwd)
+			t.Fatalf("unexpected fwd frame: %+v", fwd)
 		}
 
 		b.processGroupSubs("stream", marshalAck(ack{id: fwd.id}, nil))
@@ -597,7 +597,7 @@ func TestBrokerProcessSub(t *testing.T) {
 	handlerCalled = false
 	b.ackTimeout = time.Microsecond
 
-	var msg message
+	var frame frame
 
 	wg.Add(2)
 	go func() {
@@ -606,24 +606,24 @@ func TestBrokerProcessSub(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		msg = <-rec.pubchan("group." + pkey.String())
+		frame = <-rec.pubchan("group." + pkey.String())
 	}()
 	wg.Wait()
 
 	switch {
 	case !handlerCalled:
 		t.Fatal("expected handler to be called")
-	case msg.typ() != msgTypeFwd:
-		t.Fatalf("unexpected message type: %s", msg.typ())
+	case frame.typ() != frameTypeFwd:
+		t.Fatalf("unexpected frame type: %s", frame.typ())
 	case b.routing.keys.length() != 0:
 		t.Fatalf("unexpected number of routing keys: %d", b.routing.keys.length())
 	}
 
-	fwd, err := unmarshalFwd(msg)
+	fwd, err := unmarshalFwd(frame)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || fwd.stream != "stream" || !bytes.Equal(fwd.partitionKey, pub.partitionKey) || !bytes.Equal(fwd.payload, pub.payload) {
-		t.Fatalf("unexpected fwd message: %+v", fwd)
+		t.Fatalf("unexpected fwd frame: %+v", fwd)
 	}
 }
 
@@ -645,8 +645,8 @@ func TestBrokerStabilize(t *testing.T) {
 	b.wg.Add(1)
 
 	var (
-		wg   sync.WaitGroup
-		msgs [2]message
+		wg     sync.WaitGroup
+		frames [2]frame
 	)
 	wg.Add(2)
 	go func() {
@@ -655,8 +655,8 @@ func TestBrokerStabilize(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < len(msgs); i++ {
-			msgs[i] = <-rec.pubchan("group.0000000000000000000000000000000000000002")
+		for i := 0; i < len(frames); i++ {
+			frames[i] = <-rec.pubchan("group.0000000000000000000000000000000000000002")
 			// The generated response ids are just incremented, starting with 1.
 			b.notifyResp(uint64(i+1), nil)
 		}
@@ -664,16 +664,16 @@ func TestBrokerStabilize(t *testing.T) {
 	}()
 	wg.Wait()
 
-	for i, msg := range msgs {
-		if msg.typ() != msgTypePing {
-			t.Fatalf("unexpected message type at %d: %s", i, msg.typ())
+	for i, frame := range frames {
+		if frame.typ() != frameTypePing {
+			t.Fatalf("unexpected frame type at %d: %s", i, frame.typ())
 		}
 
-		ping, err := unmarshalPing(msg)
+		ping, err := unmarshalPing(frame)
 		if err != nil {
 			t.Errorf("unexpected error at %d: %v", i, err)
 		} else if ping.id == 0 || !ping.sender.equal(b.routing.local) {
-			t.Errorf("unexpected ping message at %d: %+v", i, ping)
+			t.Errorf("unexpected ping frame at %d: %+v", i, ping)
 		}
 	}
 }

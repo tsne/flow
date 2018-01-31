@@ -25,7 +25,7 @@ func TestPubSubNewPubSub(t *testing.T) {
 }
 
 func TestPubSubSendToGroup(t *testing.T) {
-	msg := message("group message")
+	frame := frame("group frame")
 	rec := newPubsubRecorder()
 	ps := pubsub{
 		PubSub:    rec,
@@ -33,19 +33,19 @@ func TestPubSubSendToGroup(t *testing.T) {
 	}
 
 	var sendErr error
-	go func() { sendErr = ps.sendToGroup(msg) }()
-	sentMsg := <-rec.pubchan("group")
+	go func() { sendErr = ps.sendToGroup(frame) }()
+	sentFrame := <-rec.pubchan("group")
 
 	switch {
 	case sendErr != nil:
 		t.Fatalf("unexpected error: %v", sendErr)
-	case !bytes.Equal(sentMsg, msg):
-		t.Fatalf("unexpected published message: %s", sentMsg)
+	case !bytes.Equal(sentFrame, frame):
+		t.Fatalf("unexpected published frame: %s", sentFrame)
 	}
 }
 
 func TestPubSubSendToNode(t *testing.T) {
-	msg := message("node message")
+	frame := frame("node frame")
 	rec := newPubsubRecorder()
 	ps := pubsub{
 		PubSub:    rec,
@@ -53,31 +53,31 @@ func TestPubSubSendToNode(t *testing.T) {
 	}
 
 	var sendErr error
-	go func() { sendErr = ps.sendToNode(intKey(7), msg) }()
-	sentMsg := <-rec.pubchan("group.0000000000000000000000000000000000000007")
+	go func() { sendErr = ps.sendToNode(intKey(7), frame) }()
+	sentFrame := <-rec.pubchan("group.0000000000000000000000000000000000000007")
 
 	switch {
 	case sendErr != nil:
 		t.Fatalf("unexpected error: %v", sendErr)
-	case !bytes.Equal(sentMsg, msg):
-		t.Fatalf("unexpected published message: %s", sentMsg)
+	case !bytes.Equal(sentFrame, frame):
+		t.Fatalf("unexpected published frame: %s", sentFrame)
 	}
 }
 
 func TestPubSubPublish(t *testing.T) {
-	msg := message("message")
+	frame := frame("frame")
 	rec := newPubsubRecorder()
 	ps := pubsub{PubSub: rec}
 
 	var sendErr error
-	go func() { sendErr = ps.publish("stream", msg) }()
-	sentMsg := <-rec.pubchan("stream")
+	go func() { sendErr = ps.publish("stream", frame) }()
+	sentFrame := <-rec.pubchan("stream")
 
 	switch {
 	case sendErr != nil:
 		t.Fatalf("unexpected error: %v", sendErr)
-	case !bytes.Equal(sentMsg, msg):
-		t.Fatalf("unexpected published message: %s", sentMsg)
+	case !bytes.Equal(sentFrame, frame):
+		t.Fatalf("unexpected published frame: %s", sentFrame)
 	}
 }
 
@@ -179,7 +179,7 @@ func (s *subscription) Unsubscribe() error {
 
 type pubsubRecorder struct {
 	pubMtx sync.Mutex
-	pubs   map[string]chan message // stream => message channel
+	pubs   map[string]chan frame // stream => frame channel
 
 	subMtx sync.Mutex
 	subs   map[string]*subscription // stream => subscription
@@ -188,7 +188,7 @@ type pubsubRecorder struct {
 
 func newPubsubRecorder() *pubsubRecorder {
 	return &pubsubRecorder{
-		pubs: make(map[string]chan message),
+		pubs: make(map[string]chan frame),
 		subs: make(map[string]*subscription),
 	}
 }
@@ -216,13 +216,13 @@ func (r *pubsubRecorder) Subscribe(stream, group string, h PubSubHandler) (Subsc
 	return sub, nil
 }
 
-func (r *pubsubRecorder) pubchan(stream string) chan message {
+func (r *pubsubRecorder) pubchan(stream string) chan frame {
 	r.pubMtx.Lock()
 	defer r.pubMtx.Unlock()
 
 	ch, has := r.pubs[stream]
 	if !has {
-		ch = make(chan message)
+		ch = make(chan frame)
 		r.pubs[stream] = ch
 	}
 	return ch
@@ -258,7 +258,7 @@ func (r *pubsubRecorder) countSubs() int {
 
 func (r *pubsubRecorder) clear() {
 	r.pubMtx.Lock()
-	r.pubs = map[string]chan message{}
+	r.pubs = map[string]chan frame{}
 	r.pubMtx.Unlock()
 
 	r.subMtx.Lock()

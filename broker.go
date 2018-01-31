@@ -148,38 +148,38 @@ func (b *Broker) Subscribe(stream string, handler Handler) error {
 }
 
 func (b *Broker) processGroupSubs(stream string, data []byte) {
-	msg, err := messageFromBytes(data)
+	frame, err := frameFromBytes(data)
 	if err != nil {
 		logf("group subscription error: %v", err)
 		return
 	}
 
-	switch msg.typ() {
-	case msgTypeJoin:
-		b.handleJoin(msg)
-	case msgTypeLeave:
-		b.handleLeave(msg)
-	case msgTypeInfo:
-		b.handleInfo(msg)
-	case msgTypePing:
-		b.handlePing(msg)
-	case msgTypeFwd:
-		b.handleFwd(msg)
-	case msgTypeAck:
-		b.handleAck(msg)
+	switch frame.typ() {
+	case frameTypeJoin:
+		b.handleJoin(frame)
+	case frameTypeLeave:
+		b.handleLeave(frame)
+	case frameTypeInfo:
+		b.handleInfo(frame)
+	case frameTypePing:
+		b.handlePing(frame)
+	case frameTypeFwd:
+		b.handleFwd(frame)
+	case frameTypeAck:
+		b.handleAck(frame)
 	default:
-		logf("unexpected message type: %s", msg.typ())
+		logf("unexpected frame type: %s", frame.typ())
 	}
 }
 
 func (b *Broker) processSub(stream string, data []byte) {
-	msg, err := messageFromBytes(data)
+	frm, err := frameFromBytes(data)
 	if err != nil {
 		logf("subscription error: %v", err)
 		return
 	}
 
-	pub, err := unmarshalPub(msg)
+	pub, err := unmarshalPub(frm)
 	if err != nil {
 		logf("pub unmarshal error: %v", err)
 		return
@@ -199,10 +199,10 @@ func (b *Broker) processSub(stream string, data []byte) {
 	pkey := BytesKey(pub.partitionKey)
 
 	var (
-		rid    uint64
-		errch  chan error
-		fwdmsg message
-		succ   key
+		rid      uint64
+		errch    chan error
+		fwdframe frame
+		succ     key
 	)
 	for {
 		succ = b.routing.successor(pkey[:], succ)
@@ -217,14 +217,14 @@ func (b *Broker) processSub(stream string, data []byte) {
 			return
 		}
 
-		if len(fwdmsg) == 0 {
+		if len(fwdframe) == 0 {
 			rid = b.nextRespID()
 			// We need a buffered channel here, because of the error
 			// handling below. If sending the message to the successor
 			// fails, notifyResp must not block while writing the error
 			// to the channel.
 			errch = make(chan error, 1)
-			fwdmsg = marshalFwd(fwd{
+			fwdframe = marshalFwd(fwd{
 				id:     rid,
 				origin: b.routing.local,
 				key:    pkey[:],
@@ -234,7 +234,7 @@ func (b *Broker) processSub(stream string, data []byte) {
 		}
 
 		b.awaitResp(succ, rid, errch)
-		if err := b.pubsub.sendToNode(succ, fwdmsg); err != nil {
+		if err := b.pubsub.sendToNode(succ, fwdframe); err != nil {
 			b.notifyResp(rid, err)
 		}
 		if err := <-errch; err != nil {
@@ -250,8 +250,8 @@ func (b *Broker) processSub(stream string, data []byte) {
 	}
 }
 
-func (b *Broker) handleJoin(msg message) {
-	join, err := unmarshalJoin(msg)
+func (b *Broker) handleJoin(frame frame) {
+	join, err := unmarshalJoin(frame)
 	if err != nil {
 		logf("join unmarshal error: %v", err)
 		return
@@ -261,12 +261,12 @@ func (b *Broker) handleJoin(msg message) {
 		sender := join.sender.array()
 		b.sendTo(sender[:], marshalInfo(info{
 			neighbors: b.routing.neighbors(nil),
-		}, msg))
+		}, frame))
 	}
 }
 
-func (b *Broker) handleLeave(msg message) {
-	leave, err := unmarshalLeave(msg)
+func (b *Broker) handleLeave(frame frame) {
+	leave, err := unmarshalLeave(frame)
 	if err != nil {
 		logf("leave unmarshal error: %v", err)
 		return
@@ -274,8 +274,8 @@ func (b *Broker) handleLeave(msg message) {
 	b.routing.unregister(leave.node)
 }
 
-func (b *Broker) handleInfo(msg message) {
-	info, err := unmarshalInfo(msg)
+func (b *Broker) handleInfo(frame frame) {
+	info, err := unmarshalInfo(frame)
 	if err != nil {
 		logf("info unmarshal error: %v", err)
 		return
@@ -285,8 +285,8 @@ func (b *Broker) handleInfo(msg message) {
 	b.routing.register(info.neighbors)
 }
 
-func (b *Broker) handlePing(msg message) {
-	ping, err := unmarshalPing(msg)
+func (b *Broker) handlePing(frame frame) {
+	ping, err := unmarshalPing(frame)
 	if err != nil {
 		logf("ping unmarshal error: %v", err)
 		return
@@ -296,18 +296,18 @@ func (b *Broker) handlePing(msg message) {
 	b.sendTo(sender[:], marshalInfo(info{
 		id:        ping.id,
 		neighbors: b.routing.neighbors(nil),
-	}, msg))
+	}, frame))
 }
 
-func (b *Broker) handleFwd(msg message) {
-	fwd, err := unmarshalFwd(msg)
+func (b *Broker) handleFwd(frame frame) {
+	fwd, err := unmarshalFwd(frame)
 	if err != nil {
 		logf("fwd unmarshal error: %v", err)
 		return
 	}
 
 	if succ := b.routing.successor(fwd.partitionKey, nil); len(succ) != 0 {
-		b.sendTo(succ, msg)
+		b.sendTo(succ, frame)
 		return
 	}
 
@@ -322,11 +322,11 @@ func (b *Broker) handleFwd(msg message) {
 	origin := fwd.origin.array()
 	b.sendTo(origin[:], marshalAck(ack{
 		id: fwd.id,
-	}, msg))
+	}, frame))
 }
 
-func (b *Broker) handleAck(msg message) {
-	ack, err := unmarshalAck(msg)
+func (b *Broker) handleAck(frame frame) {
+	ack, err := unmarshalAck(frame)
 	if err != nil {
 		logf("ack unmarshal error: %v", err)
 		return
@@ -370,8 +370,8 @@ func (b *Broker) notifyResp(rid uint64, err error) {
 	resp.errch <- err
 }
 
-func (b *Broker) sendTo(target key, msg message) {
-	if err := b.pubsub.sendToNode(target, msg); err != nil {
+func (b *Broker) sendTo(target key, frame frame) {
+	if err := b.pubsub.sendToNode(target, frame); err != nil {
 		logf("node send error: %v", err)
 	}
 }
@@ -388,7 +388,7 @@ func (b *Broker) stabilize(interval time.Duration) {
 	defer ticker.Stop()
 
 	var (
-		msg    message
+		frame  frame
 		stabs  keys
 		nstabs int
 		errch  chan error
@@ -409,10 +409,10 @@ func (b *Broker) stabilize(interval time.Duration) {
 		for i, n := 0, stabs.length(); i < n; i++ {
 			key := stabs.at(i)
 			ping.id = b.nextRespID()
-			msg = marshalPing(ping, msg)
+			frame = marshalPing(ping, frame)
 
 			b.awaitResp(key, ping.id, errch)
-			if err := b.pubsub.sendToNode(key, msg); err != nil {
+			if err := b.pubsub.sendToNode(key, frame); err != nil {
 				b.notifyResp(ping.id, err)
 			}
 		}
