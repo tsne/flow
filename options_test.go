@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -8,6 +9,8 @@ import (
 func TestDefaultOptions(t *testing.T) {
 	opts := defaultOptions()
 	switch {
+	case opts.codec != binaryCodec{}:
+		t.Fatalf("unexpected codec: %T", opts.codec)
 	case opts.groupName == "":
 		t.Fatal("unexpected empty group name")
 	case opts.store == nil:
@@ -31,6 +34,8 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 	}
 
 	switch {
+	case opts.codec != defaultOpts.codec:
+		t.Fatalf("unexpected codec: %T", opts.codec)
 	case opts.groupName != defaultOpts.groupName:
 		t.Fatalf("unexpected group name: %s", opts.groupName)
 	case len(opts.nodeKey) == 0:
@@ -50,12 +55,29 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 	}
 }
 
+func TestOptionMessageCodec(t *testing.T) {
+	var opts options
+
+	err := opts.apply(MessageCodec(nil))
+	if err == nil {
+		t.Fatal("error expected, got none")
+	}
+
+	err = opts.apply(MessageCodec(binaryCodec{}))
+	switch {
+	case err != nil:
+		t.Fatalf("unexpected error: %v", err)
+	case opts.codec != binaryCodec{}:
+		t.Fatalf("unexpected codec: %T", opts.codec)
+	}
+}
+
 func TestOptionGroup(t *testing.T) {
 	var opts options
 
 	err := opts.apply(Group(""))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	err = opts.apply(Group("group name"))
@@ -67,12 +89,25 @@ func TestOptionGroup(t *testing.T) {
 	}
 }
 
+func TestOptionNodeKey(t *testing.T) {
+	var opts options
+
+	key := StringKey("node key")
+	err := opts.apply(NodeKey(key))
+	switch {
+	case err != nil:
+		t.Fatalf("unexpected error: %v", err)
+	case !bytes.Equal(opts.nodeKey, key[:]):
+		t.Fatalf("unexpected node key", printableKey(opts.nodeKey))
+	}
+}
+
 func TestOptionStorage(t *testing.T) {
 	var opts options
 
 	err := opts.apply(Storage(nil))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	store := newStoreRecorder()
@@ -90,7 +125,7 @@ func TestOptionStorageFilter(t *testing.T) {
 
 	err := opts.apply(StorageFilter(nil))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	err = opts.apply(StorageFilter(func(string) bool { return true }))
@@ -108,13 +143,13 @@ func TestOptionSuccessors(t *testing.T) {
 	// negative
 	err := opts.apply(Successors(-1))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	// zero
 	err = opts.apply(Successors(0))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	// positive
@@ -133,13 +168,13 @@ func TestOptionStabilizers(t *testing.T) {
 	// negative
 	err := opts.apply(Stabilizers(-1))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	// zero
 	err = opts.apply(Stabilizers(0))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	// positive
@@ -158,13 +193,13 @@ func TestOptionStabilizationInterval(t *testing.T) {
 	// negative
 	err := opts.apply(StabilizationInterval(-1))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	// zero
 	err = opts.apply(StabilizationInterval(0))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	// positive
@@ -183,13 +218,13 @@ func TestOptionAckTimeout(t *testing.T) {
 	// negative
 	err := opts.apply(AckTimeout(-1))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	// zero
 	err = opts.apply(AckTimeout(0))
 	if err == nil {
-		t.Fatal("error expected")
+		t.Fatal("error expected, got none")
 	}
 
 	// positive

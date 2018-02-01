@@ -8,14 +8,15 @@ const (
 	errMalformedKey  = errorString("malformed key")
 	errMalformedKeys = errorString("malformed keys")
 
-	errMalformedFrame = protocolError("malformed frame")
-	errMalformedJoin  = protocolError("malformed join")
-	errMalformedLeave = protocolError("malformed leave")
-	errMalformedInfo  = protocolError("malformed info")
-	errMalformedPing  = protocolError("malformed ping")
-	errMalformedAck   = protocolError("malformed ack")
-	errMalformedPub   = protocolError("malformed pub")
-	errMalformedFwd   = protocolError("malformed fwd")
+	errMalformedFrame   = protocolError("malformed frame")
+	errMalformedJoin    = protocolError("malformed join")
+	errMalformedLeave   = protocolError("malformed leave")
+	errMalformedInfo    = protocolError("malformed info")
+	errMalformedPing    = protocolError("malformed ping")
+	errMalformedAck     = protocolError("malformed ack")
+	errMalformedPub     = protocolError("malformed pub")
+	errMalformedFwd     = protocolError("malformed fwd")
+	errMalformedMessage = protocolError("malformed message")
 )
 
 type errorString string
@@ -40,7 +41,7 @@ func (e protocolError) Error() string {
 	return "protocol error: " + string(e)
 }
 
-type ackError string
+type ackError []byte
 
 func (e ackError) Error() string {
 	return string(e)

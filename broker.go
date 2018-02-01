@@ -6,15 +6,6 @@ import (
 	"time"
 )
 
-// Message holds the data of a streaming message.
-type Message struct {
-	Stream       string    // published to the pub/sub system
-	Source       []byte    // the source the message comes from
-	Time         time.Time // the time the message was created
-	PartitionKey []byte    // the key for partitioning
-	Data         []byte    // the data which should be sent
-}
-
 // Handler represents a callback function for handling incoming messages.
 type Handler func(msg Message)
 
@@ -29,6 +20,7 @@ type pendingResp struct {
 // system. Each subscribed message is handled by the responsible
 // broker, which is determined by the respective node key.
 type Broker struct {
+	codec      Codec
 	ackTimeout time.Duration
 
 	routing routingTable
@@ -59,6 +51,7 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 	}
 
 	b := &Broker{
+		codec:        opts.codec,
 		ackTimeout:   opts.ackTimeout,
 		routing:      newRoutingTable(opts),
 		pubsub:       newPubSub(pubsub, opts),
@@ -124,13 +117,7 @@ func (b *Broker) Publish(msg Message) error {
 	if err := b.storage.persist(msg); err != nil {
 		return err
 	}
-
-	return b.pubsub.publish(msg.Stream, marshalPub(pub{
-		source:       msg.Source,
-		time:         msg.Time,
-		partitionKey: msg.PartitionKey,
-		payload:      msg.Data,
-	}, nil))
+	return b.pubsub.publish(msg.Stream, b.codec.EncodeMessage(msg))
 }
 
 // Subscribe subscribes to the messages of the specified stream.
@@ -145,6 +132,65 @@ func (b *Broker) Subscribe(stream string, handler Handler) error {
 		return nil
 	}
 	return b.pubsub.subscribe(stream, b.processSub)
+}
+
+func (b *Broker) processSub(stream string, data []byte) {
+	msg, err := b.codec.DecodeMessage(stream, data)
+	if err != nil {
+		logf("message unmarshal error: %v", err)
+		return
+	}
+
+	if len(msg.PartitionKey) == 0 {
+		b.dispatch(msg)
+		return
+	}
+
+	pkey := BytesKey(msg.PartitionKey)
+
+	var (
+		rid      uint64
+		errch    chan error
+		fwdframe frame
+		succ     key
+	)
+	for {
+		succ = b.routing.successor(pkey[:], succ)
+		if len(succ) == 0 {
+			b.dispatch(msg)
+			return
+		}
+
+		if len(fwdframe) == 0 {
+			rid = b.nextRespID()
+			// We need a buffered channel here, because of the error
+			// handling below. If sending the message to the successor
+			// fails, notifyResp must not block while writing the error
+			// to the channel.
+			errch = make(chan error, 1)
+			fwdframe = marshalFwd(fwd{
+				id:     rid,
+				origin: b.routing.local,
+				key:    pkey[:],
+				msg:    msg,
+			}, nil)
+		}
+
+		b.awaitResp(succ, rid, errch)
+		if err := b.pubsub.sendToNode(succ, fwdframe); err != nil {
+			b.notifyResp(rid, err)
+		}
+		if err := <-errch; err != nil {
+			if err == errRespTimeout {
+				// The node was suspected and removed from the
+				// valid keys. We look for the next successor
+				// to handle the message.
+				continue
+			}
+			logf("subscription error: %v", err)
+		}
+		return
+	}
 }
 
 func (b *Broker) processGroupSubs(stream string, data []byte) {
@@ -169,84 +215,6 @@ func (b *Broker) processGroupSubs(stream string, data []byte) {
 		b.handleAck(frame)
 	default:
 		logf("unexpected frame type: %s", frame.typ())
-	}
-}
-
-func (b *Broker) processSub(stream string, data []byte) {
-	frm, err := frameFromBytes(data)
-	if err != nil {
-		logf("subscription error: %v", err)
-		return
-	}
-
-	pub, err := unmarshalPub(frm)
-	if err != nil {
-		logf("pub unmarshal error: %v", err)
-		return
-	}
-
-	if len(pub.partitionKey) == 0 {
-		b.dispatch(Message{
-			Stream:       stream,
-			Source:       pub.source,
-			Time:         pub.time,
-			PartitionKey: pub.partitionKey,
-			Data:         pub.payload,
-		})
-		return
-	}
-
-	pkey := BytesKey(pub.partitionKey)
-
-	var (
-		rid      uint64
-		errch    chan error
-		fwdframe frame
-		succ     key
-	)
-	for {
-		succ = b.routing.successor(pkey[:], succ)
-		if len(succ) == 0 {
-			b.dispatch(Message{
-				Stream:       stream,
-				Source:       pub.source,
-				Time:         pub.time,
-				PartitionKey: pub.partitionKey,
-				Data:         pub.payload,
-			})
-			return
-		}
-
-		if len(fwdframe) == 0 {
-			rid = b.nextRespID()
-			// We need a buffered channel here, because of the error
-			// handling below. If sending the message to the successor
-			// fails, notifyResp must not block while writing the error
-			// to the channel.
-			errch = make(chan error, 1)
-			fwdframe = marshalFwd(fwd{
-				id:     rid,
-				origin: b.routing.local,
-				key:    pkey[:],
-				stream: stream,
-				pub:    pub,
-			}, nil)
-		}
-
-		b.awaitResp(succ, rid, errch)
-		if err := b.pubsub.sendToNode(succ, fwdframe); err != nil {
-			b.notifyResp(rid, err)
-		}
-		if err := <-errch; err != nil {
-			if err == errRespTimeout {
-				// The node was suspected and removed from the
-				// valid keys. We look for the next successor
-				// to handle the message.
-				continue
-			}
-			logf("subscription error: %v", err)
-		}
-		return
 	}
 }
 
@@ -306,18 +274,12 @@ func (b *Broker) handleFwd(frame frame) {
 		return
 	}
 
-	if succ := b.routing.successor(fwd.partitionKey, nil); len(succ) != 0 {
+	if succ := b.routing.successor(fwd.msg.PartitionKey, nil); len(succ) != 0 {
 		b.sendTo(succ, frame)
 		return
 	}
 
-	b.dispatch(Message{
-		Stream:       fwd.stream,
-		Source:       fwd.source,
-		Time:         fwd.time,
-		PartitionKey: fwd.partitionKey,
-		Data:         fwd.payload,
-	})
+	b.dispatch(fwd.msg)
 
 	origin := fwd.origin.array()
 	b.sendTo(origin[:], marshalAck(ack{

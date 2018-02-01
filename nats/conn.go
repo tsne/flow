@@ -36,9 +36,9 @@ func (c Conn) Close() error {
 	return nil
 }
 
-// Subscribe installs a handler for the specfied stream. The handler shares
+// Subscribe installs a handler for the specified stream. The handler shares
 // the incoming message stream with other handlers of the same group. If
-// there is already a handler for the given stream, an error will be returned.
+// the group is empty, a separate stream will be assigned to the handler.
 func (c Conn) Subscribe(stream, group string, h flow.PubSubHandler) (flow.Subscription, error) {
 	return c.Conn.QueueSubscribe(stream, group, func(msg *nats.Msg) {
 		h(msg.Subject, msg.Data)

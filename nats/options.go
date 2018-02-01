@@ -8,7 +8,7 @@ import (
 	nats "github.com/nats-io/go-nats"
 )
 
-// Option represents an option to configure a NATS connection.
+// Option represents an option to configure NATS connections.
 type Option func(*nats.Options) error
 
 // TLS enables secure connections to the NATS servers.
@@ -23,8 +23,8 @@ func TLS(conf *tls.Config) Option {
 	}
 }
 
-// TLSFromFiles enables secure connection by loading a key pair from
-// the given files.
+// TLSFromFiles enables secure connections to the NATS servers
+// by loading a key pair from the given files.
 func TLSFromFiles(certFile, keyFile string) Option {
 	return func(o *nats.Options) error {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -41,9 +41,9 @@ func TLSFromFiles(certFile, keyFile string) Option {
 
 // Reconnects enables or disables reconnections to the NATS servers.
 // The count parameter specifies the maximum number of reconnect
-// attempty, while the interval specifies the wait time between those
-// attempts. If count is less than or equal to zero, reconnections
-// will be disabled. Otherwise, the reconnections will be enabled.
+// attempts, while the interval specifies the wait time between those
+// attempts. If count is zero, reconnections will be disabled.
+// Otherwise, the reconnections will be enabled.
 func Reconnects(count int, interval time.Duration) Option {
 	return func(o *nats.Options) error {
 		switch {

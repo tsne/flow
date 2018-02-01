@@ -116,6 +116,7 @@ func TestBrokerPublish(t *testing.T) {
 	opts.store = store
 
 	b := &Broker{
+		codec:   binaryCodec{},
 		pubsub:  newPubSub(rec, opts),
 		storage: newStorage(opts),
 	}
@@ -151,16 +152,14 @@ func TestBrokerPublish(t *testing.T) {
 		t.Fatalf("unexpected number of store messages: %d", store.countMessages())
 	case !reflect.DeepEqual(*store.message(0), msg):
 		t.Fatalf("unexpected store message: %+v", store.message(0))
-	case published.typ() != frameTypePub:
-		t.Fatalf("unexpected frame type: %s", published.typ())
 	}
 
-	pub, err := unmarshalPub(published)
+	decoded, err := b.codec.DecodeMessage("stream", published)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !bytes.Equal(pub.source, msg.Source) || !pub.time.Equal(msg.Time) || !bytes.Equal(pub.partitionKey, msg.PartitionKey) || !bytes.Equal(pub.payload, msg.Data) {
-		t.Fatalf("unexpected pub frame: %+v", pub)
+	if !equalMessage(decoded, msg) {
+		t.Fatalf("unexpected decoded message: %+v", decoded)
 	}
 }
 
@@ -372,12 +371,12 @@ func TestBrokerHandleFwd(t *testing.T) {
 	fwd := fwd{
 		id:     11,
 		origin: keys.at(1),
-		stream: "fwdstream",
-		pub: pub{
-			source:       []byte("source id"),
-			time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
-			partitionKey: keys.at(2),
-			payload:      []byte("payload"),
+		msg: Message{
+			Stream:       "fwdstream",
+			Source:       []byte("source id"),
+			Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
+			PartitionKey: keys.at(2),
+			Data:         []byte("payload"),
 		},
 	}
 
@@ -388,19 +387,10 @@ func TestBrokerHandleFwd(t *testing.T) {
 		routing: newRoutingTable(opts),
 		pubsub:  newPubSub(rec, opts),
 		handlers: map[string][]Handler{
-			fwd.stream: {
+			fwd.msg.Stream: {
 				func(msg Message) {
-					switch {
-					case msg.Stream != fwd.stream:
-						t.Fatalf("unexpected stream: %s", msg.Stream)
-					case !bytes.Equal(msg.Source, fwd.source):
-						t.Fatalf("unexpected source: %s", msg.Source)
-					case !msg.Time.Equal(fwd.time):
-						t.Fatalf("unexpected time: %s", msg.Time)
-					case !bytes.Equal(msg.PartitionKey, fwd.partitionKey):
-						t.Fatalf("unexpected partition key: %s", msg.PartitionKey)
-					case !bytes.Equal(msg.Data, fwd.payload):
-						t.Fatalf("unexpected payload: %s", msg.Data)
+					if !equalMessage(msg, fwd.msg) {
+						t.Fatalf("unexpected message: %s", msg)
 					}
 					handlerCalled = true
 				},
@@ -497,7 +487,7 @@ func TestBrokerHandleAck(t *testing.T) {
 	wg.Wait()
 
 	switch {
-	case err != ack.err:
+	case !reflect.DeepEqual(err, ack.err):
 		t.Fatalf("unexpected ack error: %v", err)
 	case len(b.pendingResps) != 0:
 		t.Fatalf("unexpected number of pending responses: %d", len(b.pendingResps))
@@ -506,10 +496,11 @@ func TestBrokerHandleAck(t *testing.T) {
 
 func TestBrokerProcessSub(t *testing.T) {
 	handlerCalled := false
-	pub := pub{
-		source:  []byte("source id"),
-		time:    time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
-		payload: []byte("payload"),
+	publishedMsg := Message{
+		Stream: "stream",
+		Source: []byte("source id"),
+		Time:   time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
+		Data:   []byte("payload"),
 	}
 	pkey := StringKey("partition key")
 	local := pkey
@@ -521,22 +512,14 @@ func TestBrokerProcessSub(t *testing.T) {
 
 	rec := newPubsubRecorder()
 	b := &Broker{
+		codec:   binaryCodec{},
 		routing: newRoutingTable(opts),
 		pubsub:  newPubSub(rec, opts),
 		handlers: map[string][]Handler{
 			"stream": {
 				func(msg Message) {
-					switch {
-					case msg.Stream != "stream":
-						t.Fatalf("unexpected stream: %s", msg.Stream)
-					case !bytes.Equal(msg.Source, pub.source):
-						t.Fatalf("unexpected source: %s", msg.Source)
-					case !msg.Time.Equal(pub.time):
-						t.Fatalf("unexpected time: %s", msg.Time)
-					case !bytes.Equal(msg.PartitionKey, pub.partitionKey):
-						t.Fatalf("unexpected partition key: %s", msg.PartitionKey)
-					case !bytes.Equal(msg.Data, pub.payload):
-						t.Fatalf("unexpected payload: %s", msg.Data)
+					if !equalMessage(msg, publishedMsg) {
+						t.Fatalf("unexpected message: %+v", msg)
 					}
 					handlerCalled = true
 				},
@@ -546,16 +529,16 @@ func TestBrokerProcessSub(t *testing.T) {
 	}
 
 	// local dispatch without partition key
-	b.processSub("stream", marshalPub(pub, nil))
+	b.processSub("stream", b.codec.EncodeMessage(publishedMsg))
 	if !handlerCalled {
 		t.Fatal("expected handler to be called")
 	}
 
 	// local dispatch with partition key
 	handlerCalled = false
-	pub.partitionKey = []byte("partition key")
+	publishedMsg.PartitionKey = []byte("partition key")
 
-	b.processSub("stream", marshalPub(pub, nil))
+	b.processSub("stream", b.codec.EncodeMessage(publishedMsg))
 	if !handlerCalled {
 		t.Fatal("expected handler to be called")
 	}
@@ -569,7 +552,7 @@ func TestBrokerProcessSub(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processSub("stream", marshalPub(pub, nil))
+		b.processSub("stream", b.codec.EncodeMessage(publishedMsg))
 	}()
 	go func() {
 		defer wg.Done()
@@ -581,7 +564,7 @@ func TestBrokerProcessSub(t *testing.T) {
 		fwd, err := unmarshalFwd(frame)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
-		} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || fwd.stream != "stream" || !bytes.Equal(fwd.partitionKey, pub.partitionKey) || !bytes.Equal(fwd.payload, pub.payload) {
+		} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || !fwd.key.equal(pkey[:]) || !equalMessage(fwd.msg, publishedMsg) {
 			t.Fatalf("unexpected fwd frame: %+v", fwd)
 		}
 
@@ -602,7 +585,7 @@ func TestBrokerProcessSub(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b.processSub("stream", marshalPub(pub, nil))
+		b.processSub("stream", b.codec.EncodeMessage(publishedMsg))
 	}()
 	go func() {
 		defer wg.Done()
@@ -622,7 +605,7 @@ func TestBrokerProcessSub(t *testing.T) {
 	fwd, err := unmarshalFwd(frame)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || fwd.stream != "stream" || !bytes.Equal(fwd.partitionKey, pub.partitionKey) || !bytes.Equal(fwd.payload, pub.payload) {
+	} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || !fwd.key.equal(pkey[:]) || !equalMessage(fwd.msg, publishedMsg) {
 		t.Fatalf("unexpected fwd frame: %+v", fwd)
 	}
 }

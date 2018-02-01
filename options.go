@@ -10,6 +10,8 @@ import (
 type Option func(*options) error
 
 type options struct {
+	codec Codec
+
 	groupName string
 	nodeKey   key
 
@@ -26,7 +28,10 @@ type options struct {
 func defaultOptions() options {
 	// TODO: verify defaults
 	return options{
+		codec: binaryCodec{},
+
 		groupName: "_defaultgroup",
+		nodeKey:   nil, // will be set in 'apply'
 
 		store:       nullStore{},
 		storeFilter: func(string) bool { return true },
@@ -52,6 +57,19 @@ func (o *options) apply(opts ...Option) (err error) {
 		}
 	}
 	return nil
+}
+
+// MessageCodec assigns the desired message codec to the broker. The codec
+// is used to encode and decode messages to and from binary data. If no
+// message codec is assigned, an internal binary format will be used instead.
+func MessageCodec(c Codec) Option {
+	return func(o *options) error {
+		if c == nil {
+			return optionError("no message codec specified")
+		}
+		o.codec = c
+		return nil
+	}
 }
 
 // Group assigns the broker to a group with the given name.
