@@ -13,24 +13,6 @@ type Message struct {
 	Data         []byte    // the data which should be sent
 }
 
-// Encode encodes the message into its binary representation.
-func (m Message) Encode() []byte {
-	buf := alloc(messageSize(m), nil)
-	marshalMessageInto(buf, m)
-	return buf
-}
-
-// Decode decodes the message from its binary representation.
-// The message retains the given data to avoid copies.
-func (m *Message) Decode(data []byte) error {
-	msg, err := unmarshalMessageFrom(data)
-	if err != nil {
-		return err
-	}
-	*m = msg
-	return nil
-}
-
 // Codec defines an interface for encoding messages to and
 // decoding messages from binary data.
 type Codec interface {
@@ -38,15 +20,25 @@ type Codec interface {
 	DecodeMessage(stream string, data []byte) (Message, error)
 }
 
-type binaryCodec struct{}
+// DefaultCodec represents the default codec for messages. If no custom
+// codec is set, the default codec will be used for message encoding and
+// decoding.
+type DefaultCodec struct{}
 
-func (c binaryCodec) EncodeMessage(msg Message) []byte {
-	return msg.Encode()
+// EncodeMessage encodes the message into its binary representation.
+func (c DefaultCodec) EncodeMessage(msg Message) []byte {
+	buf := alloc(messageSize(msg), nil)
+	marshalMessageInto(buf, msg)
+	return buf
 }
 
-func (c binaryCodec) DecodeMessage(stream string, data []byte) (Message, error) {
-	var msg Message
-	if err := msg.Decode(data); err != nil {
+// DecodeMessage decodes the message from its binary representation.
+// The decoded message retains the given data to avoid copies. If the
+// data buffer should be reused after the decoding, the caller is
+// responsible for copying the data before passing it.
+func (c DefaultCodec) DecodeMessage(stream string, data []byte) (Message, error) {
+	msg, err := unmarshalMessageFrom(data)
+	if err != nil {
 		return msg, err
 	}
 	if msg.Stream == "" {

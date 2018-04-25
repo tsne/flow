@@ -52,7 +52,7 @@ func main() {
 	defer b.Close()
 
 	// subscribe messages
-	err = b.Subscribe(stream, func(msg *flow.Message) {
+	err = b.Subscribe(stream, func(msg flow.Message) {
 		tm := msg.Time.Format("2006-01-02 15:04:05 MST")
 		fmt.Printf("message@%s: %s\n", tm, msg.Data)
 	})

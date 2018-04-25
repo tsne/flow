@@ -6,6 +6,8 @@ import (
 )
 
 func TestMessageEncoding(t *testing.T) {
+	codec := DefaultCodec{}
+
 	msg := Message{
 		Stream:       "message stream",
 		Source:       []byte("message source"),
@@ -13,10 +15,9 @@ func TestMessageEncoding(t *testing.T) {
 		Data:         []byte("message data"),
 	}
 
-	data := msg.Encode()
+	data := codec.EncodeMessage(msg)
 
-	var unmarshalled Message
-	err := unmarshalled.Decode(data)
+	unmarshalled, err := codec.DecodeMessage(msg.Stream, data)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -25,12 +26,9 @@ func TestMessageEncoding(t *testing.T) {
 	}
 
 	// decode from invalid data
-	err = unmarshalled.Decode([]byte("invalid data"))
-	switch {
-	case err == nil:
+	_, err = codec.DecodeMessage(msg.Stream, []byte("invalid data"))
+	if err == nil {
 		t.Fatal("error expected, got none")
-	case !equalMessage(msg, unmarshalled): // should be untouched
-		t.Fatalf("unexpected message: %+v", unmarshalled)
 	}
 }
 

@@ -116,7 +116,7 @@ func TestBrokerPublish(t *testing.T) {
 	opts.store = store
 
 	b := &Broker{
-		codec:   binaryCodec{},
+		codec:   DefaultCodec{},
 		pubsub:  newPubSub(rec, opts),
 		storage: newStorage(opts),
 	}
@@ -512,7 +512,7 @@ func TestBrokerProcessSub(t *testing.T) {
 
 	rec := newPubsubRecorder()
 	b := &Broker{
-		codec:   binaryCodec{},
+		codec:   DefaultCodec{},
 		routing: newRoutingTable(opts),
 		pubsub:  newPubSub(rec, opts),
 		handlers: map[string][]Handler{

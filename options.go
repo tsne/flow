@@ -28,7 +28,7 @@ type options struct {
 func defaultOptions() options {
 	// TODO: verify defaults
 	return options{
-		codec: binaryCodec{},
+		codec: DefaultCodec{},
 
 		groupName: "_defaultgroup",
 		nodeKey:   nil, // will be set in 'apply'

@@ -9,7 +9,7 @@ import (
 func TestDefaultOptions(t *testing.T) {
 	opts := defaultOptions()
 	switch {
-	case opts.codec != binaryCodec{}:
+	case opts.codec != DefaultCodec{}:
 		t.Fatalf("unexpected codec: %T", opts.codec)
 	case opts.groupName == "":
 		t.Fatal("unexpected empty group name")
@@ -63,11 +63,11 @@ func TestOptionMessageCodec(t *testing.T) {
 		t.Fatal("error expected, got none")
 	}
 
-	err = opts.apply(MessageCodec(binaryCodec{}))
+	err = opts.apply(MessageCodec(DefaultCodec{}))
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
-	case opts.codec != binaryCodec{}:
+	case opts.codec != DefaultCodec{}:
 		t.Fatalf("unexpected codec: %T", opts.codec)
 	}
 }
@@ -98,7 +98,7 @@ func TestOptionNodeKey(t *testing.T) {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case !bytes.Equal(opts.nodeKey, key[:]):
-		t.Fatalf("unexpected node key", printableKey(opts.nodeKey))
+		t.Fatalf("unexpected node key: %s", printableKey(opts.nodeKey))
 	}
 }
 
