@@ -16,7 +16,7 @@ import (
 
 const (
 	protocolVersion = 1
-	headerLen       = 12
+	headerLen       = 12 // version + frame type + payload length
 )
 
 type frameType uint

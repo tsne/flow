@@ -63,8 +63,8 @@ func newStoreRecorder() *storeRecorder {
 	return &storeRecorder{}
 }
 
-func (r *storeRecorder) Store(msg *Message) error {
-	r.messages = append(r.messages, *msg)
+func (r *storeRecorder) Store(msg Message) error {
+	r.messages = append(r.messages, msg)
 	return nil
 }
 

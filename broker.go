@@ -7,6 +7,9 @@ import (
 )
 
 // Handler represents a callback function for handling incoming messages.
+// The binary parts of the passed message should be assumed tpo be valid
+// only during the function call. It is the handler's responsibility to
+// copy the data which should be reused.
 type Handler func(msg Message)
 
 type pendingResp struct {
@@ -109,6 +112,8 @@ func (b *Broker) Close() error {
 // Publish persists the message and publishes it to the pub/sub system.
 // If the message has no partition key, the message will be processed
 // by a random broker within the group.
+// All binary data of the passed message needs to be valid only during
+// the method call.
 func (b *Broker) Publish(msg Message) error {
 	if msg.Stream == "" {
 		return errorString("missing message stream")
@@ -152,10 +157,10 @@ func (b *Broker) processSub(stream string, data []byte) {
 		rid      uint64
 		errch    chan error
 		fwdframe frame
-		succ     key
+		keybuf   Key
 	)
 	for {
-		succ = b.routing.successor(pkey[:], succ)
+		succ := b.routing.successor(pkey[:], keybuf[:])
 		if len(succ) == 0 {
 			b.dispatch(msg)
 			return
@@ -368,7 +373,7 @@ func (b *Broker) stabilize(interval time.Duration) {
 			errch = make(chan error, nstabs)
 		}
 
-		for i, n := 0, stabs.length(); i < n; i++ {
+		for i := 0; i < nstabs; i++ {
 			key := stabs.at(i)
 			ping.id = b.nextRespID()
 			frame = marshalPing(ping, frame)

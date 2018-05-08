@@ -12,7 +12,17 @@ func TestAlloc(t *testing.T) {
 		t.Errorf("unexpected memory size: %d", len(p))
 	}
 
-	q := alloc(16, p)
+	// shrink
+	q := alloc(8, p)
+	switch {
+	case len(q) != 8:
+		t.Errorf("unexpected memory size: %d", len(q))
+	case !equalAddress(p, q):
+		t.Errorf("unexpected memory address: %p", q)
+	}
+
+	// grow
+	q = alloc(16, q)
 	switch {
 	case len(q) != 16:
 		t.Errorf("unexpected memory size: %d", len(q))
@@ -20,6 +30,7 @@ func TestAlloc(t *testing.T) {
 		t.Errorf("unexpected memory address: %p", q)
 	}
 
+	// exceed
 	q = alloc(32, q)
 	switch {
 	case len(q) != 32:

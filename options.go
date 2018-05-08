@@ -90,9 +90,7 @@ func Group(name string) Option {
 // the assigned group.
 func NodeKey(k Key) Option {
 	return func(o *options) error {
-		if len(o.nodeKey) != KeySize {
-			o.nodeKey = alloc(KeySize, nil)
-		}
+		o.nodeKey = alloc(KeySize, o.nodeKey)
 		copy(o.nodeKey, k[:])
 		return nil
 	}
