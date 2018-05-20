@@ -2,6 +2,8 @@ package flow
 
 import (
 	"crypto/rand"
+	"fmt"
+	"os"
 	"time"
 )
 
@@ -10,7 +12,8 @@ import (
 type Option func(*options) error
 
 type options struct {
-	codec Codec
+	codec        Codec
+	errorHandler func(error)
 
 	groupName string
 	nodeKey   key
@@ -28,7 +31,8 @@ type options struct {
 func defaultOptions() options {
 	// TODO: verify defaults
 	return options{
-		codec: DefaultCodec{},
+		codec:        DefaultCodec{},
+		errorHandler: func(err error) { fmt.Fprintln(os.Stderr, err) },
 
 		groupName: "_defaultgroup",
 		nodeKey:   nil, // will be set in 'apply'
@@ -68,6 +72,19 @@ func MessageCodec(c Codec) Option {
 			return optionError("no message codec specified")
 		}
 		o.codec = c
+		return nil
+	}
+}
+
+// ErrorHandler uses the given handler function to report errors, which
+// occur concurrently (e.g. when receiving an invalid subscribed message).
+// If no error handler is assigned, these errors will be logged to stderr.
+func ErrorHandler(f func(error)) Option {
+	return func(o *options) error {
+		if f == nil {
+			return optionError("no error handler specified")
+		}
+		o.errorHandler = f
 		return nil
 	}
 }

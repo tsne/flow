@@ -24,6 +24,7 @@ type pendingResp struct {
 // broker, which is determined by the respective node key.
 type Broker struct {
 	codec      Codec
+	onError    func(error)
 	ackTimeout time.Duration
 
 	routing routingTable
@@ -55,6 +56,7 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 
 	b := &Broker{
 		codec:        opts.codec,
+		onError:      opts.errorHandler,
 		ackTimeout:   opts.ackTimeout,
 		routing:      newRoutingTable(opts),
 		pubsub:       newPubSub(pubsub, opts),
@@ -88,7 +90,7 @@ func (b *Broker) Close() error {
 	// send leave message
 	leave := marshalLeave(leave{node: b.routing.local}, nil)
 	if err := b.pubsub.sendToGroup(leave); err != nil {
-		logf("group broadcast error: %v", err)
+		b.onError(errorf("group broadcast error: %v", err))
 	}
 
 	// cancel pending responses
@@ -142,7 +144,7 @@ func (b *Broker) Subscribe(stream string, handler Handler) error {
 func (b *Broker) processSub(stream string, data []byte) {
 	msg, err := b.codec.DecodeMessage(stream, data)
 	if err != nil {
-		logf("message unmarshal error: %v", err)
+		b.onError(errorf("message unmarshal error: %v", err))
 		return
 	}
 
@@ -192,7 +194,7 @@ func (b *Broker) processSub(stream string, data []byte) {
 				// to handle the message.
 				continue
 			}
-			logf("subscription error: %v", err)
+			b.onError(errorf("subscription error: %v", err))
 		}
 		return
 	}
@@ -201,7 +203,7 @@ func (b *Broker) processSub(stream string, data []byte) {
 func (b *Broker) processGroupSubs(stream string, data []byte) {
 	frame, err := frameFromBytes(data)
 	if err != nil {
-		logf("group subscription error: %v", err)
+		b.onError(errorf("group subscription error: %v", err))
 		return
 	}
 
@@ -219,14 +221,14 @@ func (b *Broker) processGroupSubs(stream string, data []byte) {
 	case frameTypeAck:
 		b.handleAck(frame)
 	default:
-		logf("unexpected frame type: %s", frame.typ())
+		b.onError(errorf("unexpected frame type: %s", frame.typ()))
 	}
 }
 
 func (b *Broker) handleJoin(frame frame) {
 	join, err := unmarshalJoin(frame)
 	if err != nil {
-		logf("join unmarshal error: %v", err)
+		b.onError(errorf("join unmarshal error: %v", err))
 		return
 	}
 	b.routing.register(keys(join.sender))
@@ -241,7 +243,7 @@ func (b *Broker) handleJoin(frame frame) {
 func (b *Broker) handleLeave(frame frame) {
 	leave, err := unmarshalLeave(frame)
 	if err != nil {
-		logf("leave unmarshal error: %v", err)
+		b.onError(errorf("leave unmarshal error: %v", err))
 		return
 	}
 	b.routing.unregister(leave.node)
@@ -250,7 +252,7 @@ func (b *Broker) handleLeave(frame frame) {
 func (b *Broker) handleInfo(frame frame) {
 	info, err := unmarshalInfo(frame)
 	if err != nil {
-		logf("info unmarshal error: %v", err)
+		b.onError(errorf("info unmarshal error: %v", err))
 		return
 	}
 
@@ -261,7 +263,7 @@ func (b *Broker) handleInfo(frame frame) {
 func (b *Broker) handlePing(frame frame) {
 	ping, err := unmarshalPing(frame)
 	if err != nil {
-		logf("ping unmarshal error: %v", err)
+		b.onError(errorf("ping unmarshal error: %v", err))
 		return
 	}
 
@@ -275,7 +277,7 @@ func (b *Broker) handlePing(frame frame) {
 func (b *Broker) handleFwd(frame frame) {
 	fwd, err := unmarshalFwd(frame)
 	if err != nil {
-		logf("fwd unmarshal error: %v", err)
+		b.onError(errorf("fwd unmarshal error: %v", err))
 		return
 	}
 
@@ -295,7 +297,7 @@ func (b *Broker) handleFwd(frame frame) {
 func (b *Broker) handleAck(frame frame) {
 	ack, err := unmarshalAck(frame)
 	if err != nil {
-		logf("ack unmarshal error: %v", err)
+		b.onError(errorf("ack unmarshal error: %v", err))
 		return
 	}
 	b.notifyResp(ack.id, ack.err)
@@ -339,7 +341,7 @@ func (b *Broker) notifyResp(rid uint64, err error) {
 
 func (b *Broker) sendTo(target key, frame frame) {
 	if err := b.pubsub.sendToNode(target, frame); err != nil {
-		logf("node send error: %v", err)
+		b.onError(errorf("node send error: %v", err))
 	}
 }
 
@@ -387,7 +389,7 @@ func (b *Broker) stabilize(interval time.Duration) {
 		// consume errors
 		for i := 0; i < nstabs; i++ {
 			if err := <-errch; err != nil && err != errClosing {
-				logf("stabilization error: %v", err)
+				b.onError(errorf("stabilization error: %v", err))
 			}
 		}
 	}

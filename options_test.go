@@ -11,6 +11,8 @@ func TestDefaultOptions(t *testing.T) {
 	switch {
 	case opts.codec != DefaultCodec{}:
 		t.Fatalf("unexpected codec: %T", opts.codec)
+	case opts.errorHandler == nil:
+		t.Fatal("expected error handler, got none")
 	case opts.groupName == "":
 		t.Fatal("unexpected empty group name")
 	case opts.store == nil:
@@ -69,6 +71,27 @@ func TestOptionMessageCodec(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	case opts.codec != DefaultCodec{}:
 		t.Fatalf("unexpected codec: %T", opts.codec)
+	}
+}
+
+func TestOptionErrorHandler(t *testing.T) {
+	var opts options
+
+	err := opts.apply(ErrorHandler(nil))
+	if err == nil {
+		t.Fatal("error expected, got none")
+	}
+
+	errorHandlerCalled := false
+	errorHandler := func(error) { errorHandlerCalled = true }
+
+	err = opts.apply(ErrorHandler(errorHandler))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	opts.errorHandler(errorString("something went wrong"))
+	if !errorHandlerCalled {
+		t.Fatal("error handler not called")
 	}
 }
 

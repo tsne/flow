@@ -38,6 +38,7 @@ type PubSub interface {
 
 type pubsub struct {
 	PubSub
+	onError   func(error)
 	groupName string
 	nodeName  string
 
@@ -48,6 +49,7 @@ type pubsub struct {
 func newPubSub(ps PubSub, opts options) pubsub {
 	return pubsub{
 		PubSub:    ps,
+		onError:   opts.errorHandler,
 		groupName: opts.groupName,
 		nodeName:  nodeName(opts.groupName, opts.nodeKey),
 		subs:      make(map[string]Subscription),
@@ -84,7 +86,7 @@ func (ps *pubsub) subscribeGroup(h PubSubHandler) error {
 
 	nodeSub, err := ps.PubSub.Subscribe(ps.nodeName, "", h)
 	if err != nil {
-		unsubscribe(ps.groupName, groupSub)
+		ps.unsubscribe(ps.groupName, groupSub)
 		return err
 	}
 
@@ -107,10 +109,16 @@ func (ps *pubsub) subscribe(stream string, h PubSubHandler) error {
 	ps.subsMtx.Unlock()
 
 	if has {
-		unsubscribe(stream, sub)
+		ps.unsubscribe(stream, sub)
 		return errorf("already subscribed to '%s'", stream)
 	}
 	return nil
+}
+
+func (ps *pubsub) unsubscribe(stream string, sub Subscription) {
+	if err := sub.Unsubscribe(); err != nil {
+		ps.onError(errorf("error unsubscribing from '%s'", stream))
+	}
 }
 
 func (ps *pubsub) shutdown() {
@@ -118,13 +126,7 @@ func (ps *pubsub) shutdown() {
 	defer ps.subsMtx.Unlock()
 
 	for stream, sub := range ps.subs {
-		unsubscribe(stream, sub)
-	}
-}
-
-func unsubscribe(stream string, sub Subscription) {
-	if err := sub.Unsubscribe(); err != nil {
-		logf("error unsubscribing from '%s'", stream)
+		ps.unsubscribe(stream, sub)
 	}
 }
 
