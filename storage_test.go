@@ -29,7 +29,6 @@ func TestStoragePersist(t *testing.T) {
 
 	msg := Message{
 		Stream:       "ignore",
-		Source:       []byte("source id"),
 		Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 		PartitionKey: []byte("partition key"),
 		Data:         []byte("data"),

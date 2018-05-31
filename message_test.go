@@ -10,7 +10,6 @@ func TestMessageEncoding(t *testing.T) {
 
 	msg := Message{
 		Stream:       "message stream",
-		Source:       []byte("message source"),
 		PartitionKey: []byte("partition key"),
 		Data:         []byte("message data"),
 	}
@@ -33,8 +32,7 @@ func TestMessageEncoding(t *testing.T) {
 }
 
 func equalMessage(left, right Message) bool {
-	return bytes.Equal(left.Source, right.Source) &&
-		left.Time.Equal(right.Time) &&
+	return left.Time.Equal(right.Time) &&
 		bytes.Equal(left.PartitionKey, right.PartitionKey) &&
 		bytes.Equal(left.Data, right.Data)
 }

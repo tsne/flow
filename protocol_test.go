@@ -202,7 +202,6 @@ func TestMarshalFwd(t *testing.T) {
 		key:    keys.at(1),
 		msg: Message{
 			Stream:       "stream",
-			Source:       []byte("source id"),
 			Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 			PartitionKey: []byte("partition key"),
 			Data:         []byte("payload"),
@@ -213,7 +212,7 @@ func TestMarshalFwd(t *testing.T) {
 	switch {
 	case frame.typ() != frameTypeFwd:
 		t.Fatalf("unexpected frame type: %s", frame.typ())
-	case len(frame.payload()) != 71+2*KeySize:
+	case len(frame.payload()) != 58+2*KeySize:
 		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 

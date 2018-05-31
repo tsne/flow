@@ -228,44 +228,39 @@ func unmarshalFwd(f frame) (fwd fwd, err error) {
 // utility functions
 
 func messageSize(msg Message) int {
-	return 28 + len(msg.Stream) + len(msg.Source) + len(msg.PartitionKey) + len(msg.Data)
+	return 24 + len(msg.Stream) + len(msg.PartitionKey) + len(msg.Data)
 }
 
 func marshalMessageInto(p []byte, msg Message) {
 	streamLen := uint32(len(msg.Stream))
-	sourceLen := uint32(len(msg.Source))
 	partitionKeyLen := uint32(len(msg.PartitionKey))
 	dataLen := uint32(len(msg.Data))
 
 	binary.BigEndian.PutUint32(p, streamLen)
 	copy(p[4:], msg.Stream)
-	binary.BigEndian.PutUint32(p[4+streamLen:], sourceLen)
-	copy(p[8+streamLen:], msg.Source)
-	binary.BigEndian.PutUint64(p[8+streamLen+sourceLen:], uint64(msg.Time.Unix()))
-	binary.BigEndian.PutUint32(p[16+streamLen+sourceLen:], uint32(msg.Time.Nanosecond()))
-	binary.BigEndian.PutUint32(p[20+streamLen+sourceLen:], partitionKeyLen)
-	copy(p[24+streamLen+sourceLen:], msg.PartitionKey)
-	binary.BigEndian.PutUint32(p[24+streamLen+sourceLen+partitionKeyLen:], dataLen)
-	copy(p[28+streamLen+sourceLen+partitionKeyLen:], msg.Data)
+	binary.BigEndian.PutUint64(p[4+streamLen:], uint64(msg.Time.Unix()))
+	binary.BigEndian.PutUint32(p[12+streamLen:], uint32(msg.Time.Nanosecond()))
+	binary.BigEndian.PutUint32(p[16+streamLen:], partitionKeyLen)
+	copy(p[20+streamLen:], msg.PartitionKey)
+	binary.BigEndian.PutUint32(p[20+streamLen+partitionKeyLen:], dataLen)
+	copy(p[24+streamLen+partitionKeyLen:], msg.Data)
 }
 
 func unmarshalMessageFrom(p []byte) (msg Message, err error) {
-	if len(p) < 28 {
+	if len(p) < 24 {
 		return msg, errMalformedMessage
 	}
 
 	streamLen := binary.BigEndian.Uint32(p)
-	sourceLen := binary.BigEndian.Uint32(p[4+streamLen:])
-	partitionKeyLen := binary.BigEndian.Uint32(p[20+streamLen+sourceLen:])
-	dataLen := binary.BigEndian.Uint32(p[24+streamLen+sourceLen+partitionKeyLen:])
+	partitionKeyLen := binary.BigEndian.Uint32(p[16+streamLen:])
+	dataLen := binary.BigEndian.Uint32(p[20+streamLen+partitionKeyLen:])
 
-	secs := int64(binary.BigEndian.Uint64(p[8+streamLen+sourceLen:]))
-	nsecs := int64(binary.BigEndian.Uint32(p[16+streamLen+sourceLen:]))
+	secs := int64(binary.BigEndian.Uint64(p[4+streamLen:]))
+	nsecs := int64(binary.BigEndian.Uint32(p[12+streamLen:]))
 
 	msg.Stream = string(p[4 : 4+streamLen])
-	msg.Source = p[8+streamLen : 8+streamLen+sourceLen]
 	msg.Time = time.Unix(secs, nsecs).UTC()
-	msg.PartitionKey = p[24+streamLen+sourceLen : 24+streamLen+sourceLen+partitionKeyLen]
-	msg.Data = p[28+streamLen+sourceLen+partitionKeyLen : 28+streamLen+sourceLen+partitionKeyLen+dataLen]
+	msg.PartitionKey = p[20+streamLen : 20+streamLen+partitionKeyLen]
+	msg.Data = p[24+streamLen+partitionKeyLen : 24+streamLen+partitionKeyLen+dataLen]
 	return msg, nil
 }

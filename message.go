@@ -7,7 +7,6 @@ import "time"
 // internally to send messages over the wire.
 type Message struct {
 	Stream       string    // published to the pub/sub system
-	Source       []byte    // the source the message comes from
 	Time         time.Time // the time the message was created
 	PartitionKey []byte    // the key for partitioning
 	Data         []byte    // the data which should be sent

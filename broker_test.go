@@ -123,7 +123,6 @@ func TestBrokerPublish(t *testing.T) {
 
 	msg := Message{
 		Stream:       "stream",
-		Source:       []byte("source id"),
 		Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 		PartitionKey: []byte("partition key"),
 		Data:         []byte("data"),
@@ -373,7 +372,6 @@ func TestBrokerHandleFwd(t *testing.T) {
 		origin: keys.at(1),
 		msg: Message{
 			Stream:       "fwdstream",
-			Source:       []byte("source id"),
 			Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 			PartitionKey: keys.at(2),
 			Data:         []byte("payload"),
@@ -498,7 +496,6 @@ func TestBrokerProcessSub(t *testing.T) {
 	handlerCalled := false
 	publishedMsg := Message{
 		Stream: "stream",
-		Source: []byte("source id"),
 		Time:   time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
 		Data:   []byte("payload"),
 	}
