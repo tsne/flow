@@ -1,659 +1,931 @@
 package flow
 
 import (
-	"bytes"
-	"reflect"
+	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestNewBroker(t *testing.T) {
-	rec := newPubsubRecorder()
-
-	var (
-		b     *Broker
-		err   error
-		wg    sync.WaitGroup
-		frame frame
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		b, err = NewBroker(rec, Group("group"))
-	}()
-	go func() {
-		defer wg.Done()
-		frame = <-rec.pubchan("group")
-	}()
-	wg.Wait()
-
-	switch {
-	case err != nil:
-		t.Fatalf("unexpected error: %v", err)
-	case b.ackTimeout <= 0:
-		t.Fatalf("unexpected ack timeout: %v", b.ackTimeout)
-	case b.respID != 0:
-		t.Fatalf("unexpected frame id: %d", b.respID)
-	case b.closing == nil:
-		t.Fatal("no closing channel")
-	case b.pendingResps == nil:
-		t.Fatal("no pending response map")
-	case len(b.pendingResps) != 0:
-		t.Fatalf("unexpected number of pending responses: %d", len(b.pendingResps))
-	case b.handlers == nil:
-		t.Fatal("no handler map")
-	case len(b.handlers) != 0:
-		t.Fatalf("unexpected number of handlers: %d", len(b.handlers))
-	case len(frame) == 0:
-		t.Fatalf("unexpected frame length: %d", len(frame))
-	case frame.typ() != frameTypeJoin:
-		t.Fatalf("unexpected frame type: %s", frame.typ())
-	}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err = b.Close()
-	}()
-	frame = <-rec.pubchan("group")
-	wg.Wait()
-
-	switch {
-	case err != nil:
-		t.Fatalf("unexpected error: %v", err)
-	case frame.typ() != frameTypeLeave:
-		t.Fatalf("unexpected frame type: %s", frame.typ())
-	}
-}
-
-func TestBrokerClose(t *testing.T) {
-	errch := make(chan error, 1)
-	rec := newPubsubRecorder()
-	b := &Broker{
-		pubsub: newPubSub(rec, defaultOptions()),
-		pendingResps: map[uint64]pendingResp{
-			1: {
-				timer: time.AfterFunc(time.Second, func() { t.Fatalf("response timeout") }),
-				errch: errch,
-			},
-		},
-		closing: make(chan struct{}),
-	}
-
-	var (
-		wg        sync.WaitGroup
-		closeErr  error
-		published frame
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		closeErr = b.Close()
-	}()
-	go func() {
-		defer wg.Done()
-		published = <-rec.pubchan(b.pubsub.groupName)
-	}()
-	wg.Wait()
-
-	if closeErr != nil {
-		t.Fatalf("unexpected close error: %v", closeErr)
-	}
-	if published.typ() != frameTypeLeave {
-		t.Fatalf("unexpected frame type: %s", published.typ())
-	}
-	if err := <-errch; err != errClosing {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestBrokerPublish(t *testing.T) {
-	rec := newPubsubRecorder()
+	pubsub := newPubsubRecorder()
 	store := newStoreRecorder()
+	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
-	opts := defaultOptions()
-	opts.store = store
-
-	b := &Broker{
-		codec:   DefaultCodec{},
-		pubsub:  newPubSub(rec, opts),
-		storage: newStorage(opts),
-	}
-
-	msg := Message{
-		Stream:       "stream",
-		Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
-		PartitionKey: []byte("partition key"),
-		Data:         []byte("data"),
-	}
-
-	var (
-		wg        sync.WaitGroup
-		err       error
-		published frame
+	b, err := NewBroker(pubsub,
+		Storage(store),
+		StabilizationInterval(time.Hour), // disable stabilization
 	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		err = b.Publish(msg)
-	}()
-	go func() {
-		defer wg.Done()
-		published = <-rec.pubchan(msg.Stream)
-	}()
-	wg.Wait()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	err = b.Publish(Message{
+		Stream:       "store-stream",
+		Time:         now,
+		PartitionKey: []byte("partition one"),
+		Data:         []byte("message data"),
+	})
 
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
 	case store.countMessages() != 1:
-		t.Fatalf("unexpected number of store messages: %d", store.countMessages())
-	case !reflect.DeepEqual(*store.message(0), msg):
-		t.Fatalf("unexpected store message: %+v", store.message(0))
-	}
-
-	decoded, err := b.codec.DecodeMessage("stream", published)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !equalMessage(decoded, msg) {
-		t.Fatalf("unexpected decoded message: %+v", decoded)
+		t.Fatalf("unexpected number of stored messages: %d", store.countMessages())
 	}
 }
 
-func TestBrokerPublishWithValidationErrors(t *testing.T) {
-	messages := []Message{
-		{ // missing stream
-		},
+func TestBrokerSubscription(t *testing.T) {
+	const groupName = "testgroup"
+
+	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
+	msg := Message{
+		Stream:       "message-stream",
+		Time:         now,
+		PartitionKey: []byte("partition one"),
+		Data:         []byte("message data"),
 	}
 
-	b := &Broker{}
-	for _, msg := range messages {
-		if b.Publish(msg) == nil {
-			t.Fatalf("error expected for message %+v", msg)
+	local := BytesKey(msg.PartitionKey)
+	localStream := nodeStream(groupName, local[:])
+
+	pubsub := newPubsubRecorder()
+	b, err := NewBroker(pubsub,
+		Group(groupName),
+		NodeKey(local),
+		AckTimeout(time.Hour),            // disable ack timeouts
+		StabilizationInterval(time.Hour), // disable stabilization
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	messageChan := make(chan Message, 1)
+	err = b.Subscribe(msg.Stream, func(msg Message) { messageChan <- msg })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	t.Run("dispatch", func(t *testing.T) {
+		err := b.Publish(msg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-	}
+
+		receivedMsg := <-messageChan
+		if !equalMessage(receivedMsg, msg) {
+			t.Fatalf("unexpected message: %+v", receivedMsg)
+		}
+	})
+
+	t.Run("forward", func(t *testing.T) {
+		partitionKey := msg.PartitionKey
+		msg.PartitionKey = []byte("partition two")
+		defer func() { msg.PartitionKey = partitionKey }()
+
+		remote := BytesKey(msg.PartitionKey)
+
+		b.routing.register(keys(remote[:]))
+		defer b.routing.unregister(remote[:])
+
+		remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote[:]))
+		defer remoteSub.Unsubscribe()
+
+		var wg sync.WaitGroup
+		defer wg.Wait()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			frame := <-remoteChan
+			if frame.typ() != frameTypeFwd {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			fwdID := lastID(b)
+			fwd, err := unmarshalFwd(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !fwd.pkey.equal(remote[:]) || !equalMessage(fwd.msg, msg):
+				t.Fatalf("unexpected fwd: %+v", fwd)
+			}
+
+			pubsub.Publish(localStream, marshalAck(ack{
+				id: fwdID,
+			}, nil))
+
+			if hasPendingAck(b, fwdID) {
+				t.Fatalf("unexpected pending ack: %d", fwdID)
+			}
+		}()
+
+		err := b.Publish(msg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("forward-timeout", func(t *testing.T) {
+		ackTimeout := b.ackTimeout
+		b.ackTimeout = time.Millisecond
+		defer func() { b.ackTimeout = ackTimeout }()
+
+		partitionKey := msg.PartitionKey
+		msg.PartitionKey = []byte("partition two")
+		defer func() { msg.PartitionKey = partitionKey }()
+
+		remote := BytesKey(msg.PartitionKey)
+
+		b.routing.register(keys(remote[:]))
+		defer b.routing.unregister(remote[:])
+
+		remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote[:]))
+		defer remoteSub.Unsubscribe()
+
+		var wg sync.WaitGroup
+		defer wg.Wait()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			frame := <-remoteChan
+			if frame.typ() != frameTypeFwd {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			fwdID := lastID(b)
+			fwd, err := unmarshalFwd(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !fwd.pkey.equal(remote[:]) || !equalMessage(fwd.msg, msg):
+				t.Fatalf("unexpected fwd: %+v", fwd)
+			}
+
+			// dispatch locally
+			receivedMsg := <-messageChan
+			switch {
+			case !equalMessage(receivedMsg, msg):
+				t.Fatalf("unexpected message: %+v", receivedMsg)
+			case hasPendingAck(b, fwdID):
+				t.Fatalf("unexpected pending ack: %d", fwdID)
+			case containsKey(keys(b.routing.keys), remote[:]):
+				t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+			}
+		}()
+
+		err := b.Publish(msg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
-func TestBrokerSubscribe(t *testing.T) {
-	rec := newPubsubRecorder()
-	b := &Broker{
-		pubsub:   newPubSub(rec, defaultOptions()),
-		handlers: make(map[string][]Handler),
-	}
+func TestBrokerGroupProtocol(t *testing.T) {
+	const groupName = "testgroup"
 
-	err := b.Subscribe("stream", func(Message) {})
-	switch {
-	case err != nil:
-		t.Fatalf("unexpected error: %v", err)
-	case len(b.handlers) != 1:
-		t.Fatalf("unexpected number of subscribed streams: %d", len(b.handlers))
-	case len(b.handlers["stream"]) != 1:
-		t.Fatalf("unexpected number of subscribed handlers: %d", len(b.handlers["stream"]))
-	}
+	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
-	s := rec.sub("stream")
-	switch {
-	case s == nil:
-		t.Fatal("no subscription")
-	case s.group != b.pubsub.groupName:
-		t.Fatalf("unexpected subscription group: %s", s.group)
-	}
+	local := intKey(1)
+	localStream := nodeStream(groupName, local)
 
-	// subscribe to the same stream again
-	err = b.Subscribe("stream", func(Message) {})
-	switch {
-	case err != nil:
-		t.Fatalf("unexpected error: %v", err)
-	case len(b.handlers) != 1:
-		t.Fatalf("unexpected number of subscribed streams: %d", len(b.handlers))
-	case len(b.handlers["stream"]) != 2:
-		t.Fatalf("unexpected number of subscribed handlers: %d", len(b.handlers["stream"]))
-	}
+	remote := intKey(2)
+	remoteStream := nodeStream(groupName, remote)
 
-	s = rec.sub("stream")
-	switch {
-	case s == nil:
-		t.Fatal("no subscription")
-	case s.group != b.pubsub.groupName:
-		t.Fatalf("unexpected subscription group: %s", s.group)
-	}
-}
+	pubsub := newPubsubRecorder()
+	groupChan, groupSub := pubsub.SubscribeChan(groupName)
+	defer groupSub.Unsubscribe()
 
-func TestBrokerHandleJoin(t *testing.T) {
-	keys := intKeys(1, 2)
-	opts := defaultOptions()
-	opts.nodeKey = keys.at(0)
-	opts.groupName = "group"
-
-	rec := newPubsubRecorder()
-	b := &Broker{
-		routing: newRoutingTable(opts),
-		pubsub:  newPubSub(rec, opts),
-	}
-
-	join := join{
-		sender: keys.at(1),
-	}
-
-	var (
-		wg    sync.WaitGroup
-		frame frame
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		b.processGroupSubs("stream", marshalJoin(join, nil))
-	}()
-	go func() {
-		defer wg.Done()
-		frame = <-rec.pubchan("group.0000000000000000000000000000000000000002")
-	}()
-	wg.Wait()
-
-	switch {
-	case b.routing.keys.length() != 1:
-		t.Fatalf("unexpected number of keys: %d", b.routing.keys.length())
-	case !b.routing.keys.at(0).equal(join.sender):
-		t.Fatalf("unexpected keys: %v", printableKeys(b.routing.keys))
-	case frame.typ() != frameTypeInfo:
-		t.Fatalf("unexpected frame type: %s", frame.typ())
-	}
-
-	info, err := unmarshalInfo(frame)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	} else if info.neighbors.length() == 0 {
-		t.Fatalf("unexpected number of neighbors: %d", info.neighbors.length())
-	}
-}
-
-func TestBrokerHandleLeave(t *testing.T) {
-	keys := intKeys(1, 2)
-	opts := defaultOptions()
-	opts.nodeKey = keys.at(0)
-
-	b := &Broker{
-		routing: newRoutingTable(opts),
-	}
-	b.routing.register(keys)
-
-	b.processGroupSubs("stream", marshalLeave(leave{
-		node: keys.at(1),
-	}, nil))
-
-	if b.routing.keys.length() != 0 {
-		t.Fatalf("unexpected number of keys: %d", b.routing.keys.length())
-	}
-}
-
-func TestBrokerHandleInfo(t *testing.T) {
-	keys := intKeys(1, 2)
-	opts := defaultOptions()
-	opts.nodeKey = keys.at(0)
-
-	b := &Broker{
-		routing: newRoutingTable(opts),
-		pendingResps: map[uint64]pendingResp{
-			1: {
-				timer: time.AfterFunc(time.Second, func() { t.Fatalf("response timeout") }),
-				errch: make(chan error, 1),
-			},
-		},
-	}
-
-	b.processGroupSubs("stream", marshalInfo(info{
-		id:        1,
-		neighbors: keys,
-	}, nil))
-
-	switch {
-	case len(b.pendingResps) != 0:
-		t.Fatalf("unexpected number of pending responses: %d", len(b.pendingResps))
-	case b.routing.keys.length() != 1:
-		t.Fatalf("unexpected number of keys: %d", b.routing.keys.length())
-	case !b.routing.keys.at(0).equal(keys.at(1)):
-		t.Fatalf("unexpected keys: %d", printableKeys(b.routing.keys))
-	}
-}
-
-func TestBrokerHandlePing(t *testing.T) {
-	keys := intKeys(1, 2)
-	opts := defaultOptions()
-	opts.nodeKey = keys.at(0)
-	opts.groupName = "group"
-
-	rec := newPubsubRecorder()
-	b := &Broker{
-		pubsub: newPubSub(rec, opts),
-	}
-
-	ping := ping{
-		id:     1,
-		sender: keys.at(1),
-	}
-
-	var (
-		wg    sync.WaitGroup
-		frame frame
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		b.processGroupSubs("stream", marshalPing(ping, nil))
-	}()
-	go func() {
-		defer wg.Done()
-		frame = <-rec.pubchan("group.0000000000000000000000000000000000000002")
-	}()
-	wg.Wait()
-
-	if frame.typ() != frameTypeInfo {
-		t.Fatalf("unexpected frame type: %s", frame.typ())
-	}
-
-	info, err := unmarshalInfo(frame)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	} else if info.neighbors.length() == 0 {
-		t.Fatalf("unexpected number of neighbors: %d", info.neighbors.length())
-	}
-}
-
-func TestBrokerHandleFwd(t *testing.T) {
-	keys := intKeys(1, 2, 3)
-	opts := defaultOptions()
-	opts.nodeKey = keys.at(0)
-	opts.groupName = "group"
-
-	fwd := fwd{
-		id:     11,
-		origin: keys.at(1),
-		msg: Message{
-			Stream:       "fwdstream",
-			Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
-			PartitionKey: keys.at(2),
-			Data:         []byte("payload"),
-		},
-	}
-
-	handlerCalled := false
-
-	rec := newPubsubRecorder()
-	b := &Broker{
-		routing: newRoutingTable(opts),
-		pubsub:  newPubSub(rec, opts),
-		handlers: map[string][]Handler{
-			fwd.msg.Stream: {
-				func(msg Message) {
-					if !equalMessage(msg, fwd.msg) {
-						t.Fatalf("unexpected message: %s", msg)
-					}
-					handlerCalled = true
-				},
-			},
-		},
-	}
-
-	var (
-		wg    sync.WaitGroup
-		frame frame
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		b.processGroupSubs("stream", marshalFwd(fwd, nil))
-	}()
-	go func() {
-		defer wg.Done()
-		frame = <-rec.pubchan("group.0000000000000000000000000000000000000002")
-	}()
-	wg.Wait()
-
-	// local dispatch
-	switch {
-	case !handlerCalled:
-		t.Fatal("expected handler to be called")
-	case frame.typ() != frameTypeAck:
-		t.Fatalf("unexpected frame type: %s", frame.typ())
-	}
-
-	ack, err := unmarshalAck(frame)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	} else if ack.id != fwd.id {
-		t.Fatalf("unexpected ack id: %d", ack.id)
-	} else if ack.err != nil {
-		t.Fatalf("unexpected ack error: %v", ack.err)
-	}
-
-	// forward again
-	rec.clear()
-	handlerCalled = false
-	fwdframe := marshalFwd(fwd, nil)
-	b.routing.register(keys)
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		b.processGroupSubs("stream", fwdframe)
-	}()
-	go func() {
-		defer wg.Done()
-		frame = <-rec.pubchan("group.0000000000000000000000000000000000000003")
-	}()
-	wg.Wait()
-
-	switch {
-	case handlerCalled:
-		t.Fatal("unexpected handler call")
-	case !bytes.Equal(frame, fwdframe):
-		t.Fatalf("unexpected fwd frame: %v", frame)
-	}
-}
-
-func TestBrokerHandleAck(t *testing.T) {
-	errch := make(chan error)
-	b := &Broker{
-		pendingResps: map[uint64]pendingResp{
-			7: {
-				timer: time.AfterFunc(time.Second, func() { t.Fatalf("response timeout") }),
-				errch: errch,
-			},
-		},
-	}
-
-	ack := ack{
-		id:  7,
-		err: ackError("error"),
-	}
-
-	var (
-		wg  sync.WaitGroup
-		err error
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		b.processGroupSubs("stream", marshalAck(ack, nil))
-	}()
-	go func() {
-		defer wg.Done()
-		err = <-errch
-	}()
-	wg.Wait()
-
-	switch {
-	case !reflect.DeepEqual(err, ack.err):
-		t.Fatalf("unexpected ack error: %v", err)
-	case len(b.pendingResps) != 0:
-		t.Fatalf("unexpected number of pending responses: %d", len(b.pendingResps))
-	}
-}
-
-func TestBrokerProcessSub(t *testing.T) {
-	handlerCalled := false
-	publishedMsg := Message{
-		Stream: "stream",
-		Time:   time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
-		Data:   []byte("payload"),
-	}
-	pkey := StringKey("partition key")
-	local := pkey
-	local[0]++
-
-	opts := defaultOptions()
-	opts.nodeKey = local[:]
-	opts.groupName = "group"
-
-	rec := newPubsubRecorder()
-	b := &Broker{
-		codec:   DefaultCodec{},
-		routing: newRoutingTable(opts),
-		pubsub:  newPubSub(rec, opts),
-		handlers: map[string][]Handler{
-			"stream": {
-				func(msg Message) {
-					if !equalMessage(msg, publishedMsg) {
-						t.Fatalf("unexpected message: %+v", msg)
-					}
-					handlerCalled = true
-				},
-			},
-		},
-		pendingResps: map[uint64]pendingResp{},
-	}
-
-	// local dispatch without partition key
-	b.processSub("stream", b.codec.EncodeMessage(publishedMsg))
-	if !handlerCalled {
-		t.Fatal("expected handler to be called")
-	}
-
-	// local dispatch with partition key
-	handlerCalled = false
-	publishedMsg.PartitionKey = []byte("partition key")
-
-	b.processSub("stream", b.codec.EncodeMessage(publishedMsg))
-	if !handlerCalled {
-		t.Fatal("expected handler to be called")
-	}
-
-	// forward with ack
-	handlerCalled = false
-	b.ackTimeout = time.Second
-	b.routing.register(pkey[:])
+	remoteChan, remoteSub := pubsub.SubscribeChan(remoteStream)
+	defer remoteSub.Unsubscribe()
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		b.processSub("stream", b.codec.EncodeMessage(publishedMsg))
-	}()
-	go func() {
-		defer wg.Done()
-		frame := <-rec.pubchan("group." + pkey.String())
-		if frame.typ() != frameTypeFwd {
+
+		frame := <-groupChan
+		if frame.typ() != frameTypeJoin {
 			t.Fatalf("unexpected frame type: %s", frame.typ())
 		}
 
-		fwd, err := unmarshalFwd(frame)
-		if err != nil {
+		join, err := unmarshalJoin(frame)
+		switch {
+		case err != nil:
 			t.Fatalf("unexpected error: %v", err)
-		} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || !fwd.key.equal(pkey[:]) || !equalMessage(fwd.msg, publishedMsg) {
-			t.Fatalf("unexpected fwd frame: %+v", fwd)
+		case !join.sender.equal(local):
+			t.Fatalf("unexpected join: %+v", join)
 		}
 
-		b.processGroupSubs("stream", marshalAck(ack{id: fwd.id}, nil))
+		pubsub.Publish(localStream, marshalInfo(info{
+			id:        13,
+			neighbors: intKeys(101, 102, 103),
+		}, nil))
 	}()
-	wg.Wait()
 
-	if handlerCalled {
-		t.Fatal("unexpected handler call")
-	}
-
-	// forward with ack timeout
-	handlerCalled = false
-	b.ackTimeout = time.Microsecond
-
-	var frame frame
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		b.processSub("stream", b.codec.EncodeMessage(publishedMsg))
-	}()
-	go func() {
-		defer wg.Done()
-		frame = <-rec.pubchan("group." + pkey.String())
-	}()
-	wg.Wait()
-
-	switch {
-	case !handlerCalled:
-		t.Fatal("expected handler to be called")
-	case frame.typ() != frameTypeFwd:
-		t.Fatalf("unexpected frame type: %s", frame.typ())
-	case b.routing.keys.length() != 0:
-		t.Fatalf("unexpected number of routing keys: %d", b.routing.keys.length())
-	}
-
-	fwd, err := unmarshalFwd(frame)
+	b, err := NewBroker(pubsub,
+		NodeKey(local.array()),
+		Group(groupName),
+		AckTimeout(time.Hour),            // disable ack timeouts
+		ResponseTimeout(time.Hour),       // disable response timeouts
+		StabilizationInterval(time.Hour), // disable stabilization
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	} else if fwd.id == 0 || !fwd.origin.equal(b.routing.local) || !fwd.key.equal(pkey[:]) || !equalMessage(fwd.msg, publishedMsg) {
-		t.Fatalf("unexpected fwd frame: %+v", fwd)
+	}
+	wg.Wait()
+
+	if !equalKeys(keys(b.routing.keys), intKeys(101, 102, 103)) {
+		t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+	}
+
+	b.routing.unregister(intKey(101))
+	b.routing.unregister(intKey(102))
+	b.routing.unregister(intKey(103))
+
+	if b.routing.keys.length() != 0 {
+		t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+	}
+
+	// --- join -->
+	// <-- info ---
+	t.Run("join", func(t *testing.T) {
+		wg.Add(1)
+		defer wg.Wait()
+
+		go func() {
+			defer wg.Done()
+
+			_ = <-groupChan // consume JOIN
+			frame := <-remoteChan
+			if frame.typ() != frameTypeInfo {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			info, err := unmarshalInfo(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case info.id != 0 || !equalKeys(info.neighbors, keys(b.routing.local)):
+				t.Fatalf("unexpected info: %+v", info)
+			}
+		}()
+
+		pubsub.Publish(groupName, marshalJoin(join{sender: remote}, nil))
+
+		if !containsKey(keys(b.routing.keys), remote) {
+			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+		}
+	})
+
+	// --- ping -->
+	// <-- info ---
+	t.Run("ping", func(t *testing.T) {
+		wg.Add(1)
+		defer wg.Wait()
+
+		id := b.nextID()
+		expectedNeighbors := b.routing.neighbors(nil)
+
+		go func() {
+			defer wg.Done()
+
+			frame := <-remoteChan
+			if frame.typ() != frameTypeInfo {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			info, err := unmarshalInfo(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case info.id != id || !equalKeys(info.neighbors, expectedNeighbors):
+				t.Fatalf("unexpected info: %+v", info)
+			}
+		}()
+
+		pubsub.Publish(localStream, marshalPing(ping{
+			id:     id,
+			sender: remote,
+		}, nil))
+	})
+
+	// --- fwd -->
+	//              dispatch
+	// <-- ack ---
+	t.Run("dispatch", func(t *testing.T) {
+		wg.Add(1)
+		defer wg.Wait()
+
+		id := b.nextID()
+		msg := Message{
+			Stream:       "mystream",
+			Time:         now,
+			PartitionKey: nil,
+			Data:         []byte("message data"),
+		}
+
+		incoming := make(chan Message, 1)
+		err := b.Subscribe(msg.Stream, func(m Message) {
+			incoming <- m
+		})
+		if err != nil {
+			t.Fatalf("unexpexted error: %v", err)
+		}
+		defer clearSubscriptions(b, msg.Stream)
+
+		go func() {
+			defer wg.Done()
+
+			frame := <-remoteChan
+			if frame.typ() != frameTypeAck {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			ack, err := unmarshalAck(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case ack.id != id:
+				t.Fatalf("unexpected ack: %+v", ack)
+			}
+		}()
+
+		pubsub.Publish(localStream, marshalFwd(fwd{
+			id:   id,
+			ack:  remote,
+			pkey: local,
+			msg:  msg,
+		}, nil))
+
+		if in := <-incoming; !equalMessage(in, msg) {
+			t.Fatalf("unexpected incoming message: %+v", in)
+		}
+	})
+
+	// --- fwd -->
+	// <-- ack ---
+	//              --- fwd -->
+	//              <-- ack ---
+	t.Run("forward", func(t *testing.T) {
+		wg.Add(1)
+		defer wg.Wait()
+
+		id := b.nextID()
+		msg := Message{
+			Stream:       "mystream",
+			Time:         now,
+			PartitionKey: nil,
+			Data:         []byte("message data"),
+		}
+
+		go func() {
+			defer wg.Done()
+
+			// ack
+			frame := <-remoteChan
+			if frame.typ() != frameTypeAck {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			sentAck, err := unmarshalAck(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case sentAck.id != id:
+				t.Fatalf("unexpected ack: %+v", sentAck)
+			}
+
+			// fwd
+			frame = <-remoteChan
+			if frame.typ() != frameTypeFwd {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			fwdID := lastID(b)
+			fwd, err := unmarshalFwd(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case fwd.id != fwdID || !fwd.ack.equal(local) || !fwd.pkey.equal(remote) || !equalMessage(fwd.msg, msg):
+				t.Fatalf("unexpected fwd: %+v", fwd)
+			}
+
+			pubsub.Publish(localStream, marshalAck(ack{
+				id: fwdID,
+			}, nil))
+
+			if hasPendingAck(b, fwdID) {
+				t.Fatalf("unexpected pending ack: %d", fwdID)
+			}
+		}()
+
+		pubsub.Publish(localStream, marshalFwd(fwd{
+			id:   id,
+			ack:  remote,
+			pkey: remote,
+			msg:  msg,
+		}, nil))
+
+	})
+
+	// --- fwd -->
+	// <-- ack ---
+	//              --- fwd -->
+	//                timeout
+	//                dispatch
+	t.Run("forward-timeout", func(t *testing.T) {
+		wg.Add(1)
+		defer wg.Wait()
+
+		id := b.nextID()
+		msg := Message{
+			Stream:       "mystream",
+			Time:         now,
+			PartitionKey: nil,
+			Data:         []byte("message data"),
+		}
+
+		go func() {
+			defer wg.Done()
+
+			ackTimeout := b.ackTimeout
+			b.ackTimeout = time.Millisecond
+			defer func() { b.ackTimeout = ackTimeout }()
+
+			dispatched := make(chan Message, 1)
+			b.Subscribe(msg.Stream, func(msg Message) {
+				dispatched <- msg
+			})
+
+			// ack
+			frame := <-remoteChan
+			if frame.typ() != frameTypeAck {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			sentAck, err := unmarshalAck(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case sentAck.id != id:
+				t.Fatalf("unexpected ack: %+v", sentAck)
+			}
+
+			// fwd
+			frame = <-remoteChan
+			if frame.typ() != frameTypeFwd {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			fwdID := lastID(b)
+			fwd, err := unmarshalFwd(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case fwd.id != fwdID || !fwd.ack.equal(local) || !fwd.pkey.equal(remote) || !equalMessage(fwd.msg, msg):
+				t.Fatalf("unexpected fwd: %+v", fwd)
+			}
+
+			// dispatch
+			dispatchedMsg := <-dispatched
+			switch {
+			case !equalMessage(dispatchedMsg, msg):
+				t.Fatalf("unexpected dispatched message: %+v", dispatchedMsg)
+			case containsKey(keys(b.routing.keys), remote):
+				t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+			}
+
+			// add remote again for following tests
+			b.routing.register(keys(remote))
+		}()
+
+		pubsub.Publish(localStream, marshalFwd(fwd{
+			id:   id,
+			ack:  remote,
+			pkey: remote,
+			msg:  msg,
+		}, nil))
+	})
+
+	// leave
+	t.Run("leave", func(t *testing.T) {
+		wg.Add(1)
+		defer wg.Wait()
+
+		go func() {
+			defer wg.Done()
+
+			_ = <-groupChan // consume LEAV
+		}()
+
+		pubsub.Publish(groupName, marshalLeave(leave{node: remote}, nil))
+
+		if containsKey(keys(b.routing.keys), remote) {
+			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+		}
+	})
+}
+
+func TestBrokerRequest(t *testing.T) {
+	const groupName = "testgroup"
+
+	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
+
+	local := intKey(1)
+	localStream := nodeStream(groupName, local)
+
+	pubsub := newPubsubRecorder()
+	b, err := NewBroker(pubsub,
+		NodeKey(local.array()),
+		Group(groupName),
+		AckTimeout(time.Hour),            // disable ack timeouts
+		ResponseTimeout(time.Hour),       // disable response timeouts
+		StabilizationInterval(time.Hour), // disable stabilization
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	request := Message{
+		Stream:       "myrequests",
+		PartitionKey: []byte("partition one"),
+		Time:         now,
+		Data:         []byte("request data"),
+	}
+
+	response := Message{
+		Stream:       "myresponses",
+		Time:         now,
+		PartitionKey: []byte("partition two"),
+		Data:         []byte("response data"),
+	}
+
+	t.Run("dispatch", func(t *testing.T) {
+		err = b.SubscribeRequest(request.Stream, func(msg Message) Message {
+			if !equalMessage(msg, request) {
+				t.Fatalf("unexpected request: %+v", msg)
+			}
+			return response
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer clearSubscriptions(b, request.Stream)
+
+		msg, err := b.Request(context.Background(), request)
+		switch {
+		case err != nil:
+			t.Fatalf("unexpected error: %v", err)
+		case !equalMessage(msg, response):
+			t.Fatalf("unexpected response: %+v", msg)
+		}
+	})
+
+	t.Run("forward", func(t *testing.T) {
+		err := b.SubscribeRequest(request.Stream, func(msg Message) Message {
+			t.Fatal("unexpected request handler call")
+			return msg
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer clearSubscriptions(b, request.Stream)
+
+		remote := intKey(0)
+		reqID := lastID(b) + 1
+
+		b.routing.register(keys(remote))
+		defer b.routing.unregister(remote)
+
+		remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote))
+		defer remoteSub.Unsubscribe()
+
+		var wg sync.WaitGroup
+		defer wg.Wait()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			frame := <-remoteChan
+			if frame.typ() != frameTypeFwd {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			fwdID := lastID(b)
+			pkey := BytesKey(request.PartitionKey)
+			fwd, err := unmarshalFwd(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case fwd.id != fwdID || !fwd.ack.equal(local) || !fwd.pkey.equal(pkey[:]) || !equalMessage(fwd.msg, request):
+				t.Fatalf("unexpected fwd: %+v", fwd)
+			}
+
+			pubsub.Publish(localStream, marshalAck(ack{
+				id: fwdID,
+			}, nil))
+			pubsub.Publish(localStream, marshalResp(resp{
+				id:  reqID,
+				msg: response,
+			}, nil))
+		}()
+
+		msg, err := b.Request(context.Background(), request)
+		switch {
+		case err != nil:
+			t.Fatalf("unexpected error: %v", err)
+		case !equalMessage(msg, response):
+			t.Fatalf("unexpected response: %+v", msg)
+		case hasPendingAck(b, reqID):
+			t.Fatalf("unexpected pending ack: %d", reqID)
+		}
+	})
+
+	t.Run("forward-timeout", func(t *testing.T) {
+		ackTimeout := b.ackTimeout
+		b.ackTimeout = time.Millisecond
+		defer func() { b.ackTimeout = ackTimeout }()
+
+		requestChan := make(chan Message, 1)
+		err := b.SubscribeRequest(request.Stream, func(msg Message) Message {
+			requestChan <- msg
+			return response
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer clearSubscriptions(b, request.Stream)
+
+		remote := intKey(0)
+		reqID := lastID(b) + 1
+
+		b.routing.register(keys(remote))
+
+		remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote))
+		defer remoteSub.Unsubscribe()
+
+		var wg sync.WaitGroup
+		defer wg.Wait()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			frame := <-remoteChan
+			if frame.typ() != frameTypeFwd {
+				t.Fatalf("unexpected frame type: %s", frame.typ())
+			}
+
+			fwdID := lastID(b)
+			pkey := BytesKey(request.PartitionKey)
+			fwd, err := unmarshalFwd(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case fwd.id != fwdID || !fwd.ack.equal(local) || !fwd.pkey.equal(pkey[:]) || !equalMessage(fwd.msg, request):
+				t.Fatalf("unexpected fwd: %+v", fwd)
+			}
+
+			msg := <-requestChan
+			switch {
+			case !equalMessage(msg, request):
+				t.Fatalf("unexpected request message: %+v", msg)
+			case containsKey(keys(b.routing.keys), remote):
+				t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+			}
+		}()
+
+		msg, err := b.Request(context.Background(), request)
+		switch {
+		case err != nil:
+			t.Fatalf("unexpected error: %v", err)
+		case !equalMessage(msg, response):
+			t.Fatalf("unexpected response: %+v", msg)
+		case hasPendingAck(b, reqID):
+			t.Fatalf("unexpected pending ack: %d", reqID)
+		}
+	})
+
+	t.Run("deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+
+		_, err := b.Request(ctx, request)
+		if err != ctx.Err() {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		respTimeout := b.respTimeout
+		b.respTimeout = time.Millisecond
+		defer func() { b.respTimeout = respTimeout }()
+
+		_, err := b.Request(context.Background(), request)
+		if err != ErrTimeout {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestBrokerClose(t *testing.T) {
+	const groupName = "testgroup"
+
+	pubsub := newPubsubRecorder()
+
+	local := intKey(1)
+	localStream := nodeStream(groupName, local)
+	localChan, localSub := pubsub.SubscribeChan(localStream)
+	defer localSub.Unsubscribe()
+
+	remote := intKey(2)
+	//remoteStream := nodeStream(groupName, remote)
+
+	errch := make(chan error, 1)
+	b, err := NewBroker(pubsub,
+		NodeKey(local.array()),
+		Group(groupName),
+		AckTimeout(time.Hour),            // disable ack timeouts
+		ResponseTimeout(time.Hour),       // disable response timeouts
+		StabilizationInterval(time.Hour), // disable stabilization
+		ErrorHandler(func(err error) {
+			errch <- err
+		}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	b.routing.register(keys(remote))
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		pubsub.Publish(localStream, marshalFwd(fwd{
+			id:   13,
+			ack:  remote,
+			pkey: remote,
+		}, nil))
+	}()
+
+	// make sure the fwd message has been sent to the broker
+	<-localChan
+
+	b.Close()
+	if err := <-errch; err != ErrClosed {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestBrokerStabilize(t *testing.T) {
-	keys := intKeys(1, 2)
-	opts := defaultOptions()
-	opts.groupName = "group"
-	opts.nodeKey = keys.at(0)
+func TestBrokerStabilization(t *testing.T) {
+	const groupName = "testgroup"
 
-	rec := newPubsubRecorder()
-	b := &Broker{
-		ackTimeout:   time.Second,
-		routing:      newRoutingTable(opts),
-		pubsub:       newPubSub(rec, opts),
-		closing:      make(chan struct{}),
-		pendingResps: make(map[uint64]pendingResp),
+	local := intKey(1)
+	localStream := nodeStream(groupName, local)
+
+	remote := intKey(11)
+
+	pubsub := newPubsubRecorder()
+	remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote))
+	defer remoteSub.Unsubscribe()
+
+	newBroker := func(ackTimeout time.Duration) (*Broker, error) {
+		b := &Broker{
+			ackTimeout: ackTimeout,
+			routing: newRoutingTable(options{
+				nodeKey:         local,
+				stabilizerCount: 1,
+			}),
+			pubsub: newPubSub(pubsub, options{
+				groupName: groupName,
+				nodeKey:   local,
+			}),
+			closing:     make(chan struct{}),
+			pendingAcks: make(map[uint64]pendingAck),
+		}
+
+		b.routing.register(keys(remote))
+
+		err := b.pubsub.subscribeGroup(b.processGroupProtocol)
+		return b, err
 	}
-	b.routing.register(keys)
-	b.wg.Add(1)
 
-	var (
-		wg     sync.WaitGroup
-		frames [2]frame
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		b.stabilize(time.Millisecond)
-	}()
-	go func() {
-		defer wg.Done()
-		for i := 0; i < len(frames); i++ {
-			frames[i] = <-rec.pubchan("group.0000000000000000000000000000000000000002")
-			// The generated response ids are just incremented, starting with 1.
-			b.notifyResp(uint64(i+1), nil)
-		}
-		close(b.closing)
-	}()
-	wg.Wait()
-
-	for i, frame := range frames {
-		if frame.typ() != frameTypePing {
-			t.Fatalf("unexpected frame type at %d: %s", i, frame.typ())
-		}
-
-		ping, err := unmarshalPing(frame)
+	t.Run("ack", func(t *testing.T) {
+		b, err := newBroker(time.Hour) // disable ack timeouts
 		if err != nil {
-			t.Errorf("unexpected error at %d: %v", i, err)
-		} else if ping.id == 0 || !ping.sender.equal(b.routing.local) {
-			t.Errorf("unexpected ping frame at %d: %+v", i, ping)
+			t.Fatalf("unexpected error: %v", err)
 		}
+
+		b.wg.Add(1)
+		go b.stabilize(time.Millisecond) // wg.Done is called by stabilize
+
+		b.wg.Add(1)
+		go func() {
+			defer b.wg.Done()
+
+			frame := <-remoteChan
+			close(b.closing)
+			if frame.typ() != frameTypePing {
+				t.Fatalf("unexpected frame type for %v: %s", remote, frame.typ())
+			}
+
+			const pingID = 1
+
+			ping, err := unmarshalPing(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case ping.id != pingID || !ping.sender.equal(local):
+				t.Fatalf("unexpected ping: %+v", ping)
+			}
+
+			pubsub.Publish(localStream, marshalInfo(info{
+				id:        pingID,
+				neighbors: keys(remote),
+			}, nil))
+
+			switch {
+			case hasPendingAck(b, pingID):
+				t.Fatalf("unexpected pending ack: %d", pingID)
+			case !containsKey(keys(b.routing.keys), remote):
+				t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+			}
+		}()
+
+		b.wg.Wait()
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		b, err := newBroker(time.Millisecond)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		const pingID = 1
+
+		b.wg.Add(1)
+		go b.stabilize(time.Millisecond) // wg.Done is called by stabilize
+
+		b.wg.Add(1)
+		go func() {
+			defer b.wg.Done()
+
+			frame := <-remoteChan
+			close(b.closing)
+			if frame.typ() != frameTypePing {
+				t.Fatalf("unexpected frame type for %v: %s", remote, frame.typ())
+			}
+
+			ping, err := unmarshalPing(frame)
+			switch {
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case ping.id != pingID || !ping.sender.equal(local):
+				t.Fatalf("unexpected ping: %+v", ping)
+			}
+
+		}()
+
+		b.wg.Wait()
+
+		switch {
+		case hasPendingAck(b, pingID):
+			t.Fatalf("unexpected pending ack: %d", pingID)
+		case containsKey(keys(b.routing.keys), remote):
+			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+		}
+	})
+}
+
+func clearSubscriptions(b *Broker, stream string) {
+	b.pubsub.subsMtx.Lock()
+	sub, has := b.pubsub.subs[stream]
+	delete(b.pubsub.subs, stream)
+	b.pubsub.subsMtx.Unlock()
+
+	if has {
+		sub.Unsubscribe()
+		b.handlerGroups.Delete(stream)
+		b.requestHandlers.Delete(stream)
 	}
+}
+
+func lastID(b *Broker) uint64 {
+	return atomic.LoadUint64(&b.id)
+}
+
+func hasPendingAck(b *Broker, id uint64) bool {
+	b.pendingAckMtx.Lock()
+	_, has := b.pendingAcks[id]
+	b.pendingAckMtx.Unlock()
+	return has
 }

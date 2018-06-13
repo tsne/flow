@@ -12,6 +12,13 @@ type Message struct {
 	Data         []byte    // the data which should be sent
 }
 
+func (m *Message) validate() error {
+	if m.Stream == "" {
+		return errorString("missing message stream")
+	}
+	return nil
+}
+
 // Codec defines an interface for encoding messages to and
 // decoding messages from binary data.
 type Codec interface {

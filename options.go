@@ -13,38 +13,36 @@ type Option func(*options) error
 
 type options struct {
 	codec        Codec
+	store        Store
 	errorHandler func(error)
 
 	groupName string
 	nodeKey   key
-
-	store       Store
-	storeFilter func(stream string) bool
 
 	successorCount  int
 	stabilizerCount int
 
 	stabilizationInterval time.Duration
 	ackTimeout            time.Duration
+	respTimeout           time.Duration
 }
 
 func defaultOptions() options {
 	// TODO: verify defaults
 	return options{
 		codec:        DefaultCodec{},
+		store:        nullStore{},
 		errorHandler: func(err error) { fmt.Fprintln(os.Stderr, err) },
 
-		groupName: "_defaultgroup",
+		groupName: "_flowgroup",
 		nodeKey:   nil, // will be set in 'apply'
-
-		store:       nullStore{},
-		storeFilter: func(string) bool { return true },
 
 		successorCount:  5,
 		stabilizerCount: 5,
 
 		stabilizationInterval: 10 * time.Second,
-		ackTimeout:            500 * time.Millisecond,
+		ackTimeout:            750 * time.Millisecond,
+		respTimeout:           1500 * time.Millisecond,
 	}
 }
 
@@ -125,20 +123,6 @@ func Storage(s Store) Option {
 	}
 }
 
-// StorageFilter defines a filter function for the storage system.
-// The given function decides which streams should be stored and which
-// should not. If true is returned, the message will be stored.
-// Otherwise the storage system is bypassed.
-func StorageFilter(f func(stream string) bool) Option {
-	return func(o *options) error {
-		if f == nil {
-			return optionError("no filter specified")
-		}
-		o.storeFilter = f
-		return nil
-	}
-}
-
 // Successors defines the number of successor nodes which should be used
 // to spread information about the local group structure.
 func Successors(n int) Option {
@@ -182,6 +166,18 @@ func AckTimeout(d time.Duration) Option {
 			return optionError("non-positive ack timeout")
 		}
 		o.ackTimeout = d
+		return nil
+	}
+}
+
+// ResponseTimeout defines the timeout for receiving a response
+// of a request.
+func ResponseTimeout(d time.Duration) Option {
+	return func(o *options) error {
+		if d <= 0 {
+			return optionError("non-positive response timeout")
+		}
+		o.respTimeout = d
 		return nil
 	}
 }

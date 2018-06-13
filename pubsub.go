@@ -37,10 +37,10 @@ type PubSub interface {
 }
 
 type pubsub struct {
-	PubSub
-	onError   func(error)
-	groupName string
-	nodeName  string
+	ps          PubSub
+	onError     func(error)
+	groupStream string
+	nodeStream  string
 
 	subsMtx sync.Mutex
 	subs    map[string]Subscription
@@ -48,70 +48,67 @@ type pubsub struct {
 
 func newPubSub(ps PubSub, opts options) pubsub {
 	return pubsub{
-		PubSub:    ps,
-		onError:   opts.errorHandler,
-		groupName: opts.groupName,
-		nodeName:  nodeName(opts.groupName, opts.nodeKey),
-		subs:      make(map[string]Subscription),
+		ps:          ps,
+		onError:     opts.errorHandler,
+		groupStream: opts.groupName,
+		nodeStream:  nodeStream(opts.groupName, opts.nodeKey),
+		subs:        make(map[string]Subscription),
 	}
 }
 
-func (ps *pubsub) sendToGroup(frame frame) error {
-	return ps.PubSub.Publish(ps.groupName, frame)
+func (ps *pubsub) sendToGroup(data []byte) error {
+	return ps.ps.Publish(ps.groupStream, data)
 }
 
-func (ps *pubsub) sendToNode(target key, frame frame) error {
-	stream := nodeName(ps.groupName, target)
-	return ps.PubSub.Publish(stream, frame)
+func (ps *pubsub) sendToNode(target key, data []byte) error {
+	stream := nodeStream(ps.groupStream, target)
+	return ps.ps.Publish(stream, data)
 }
 
-func (ps *pubsub) publish(stream string, frame frame) error {
-	return ps.PubSub.Publish(stream, frame)
+func (ps *pubsub) publish(stream string, data []byte) error {
+	return ps.ps.Publish(stream, data)
 }
 
 func (ps *pubsub) subscribeGroup(h PubSubHandler) error {
 	ps.subsMtx.Lock()
 	defer ps.subsMtx.Unlock()
 
-	_, hasGroupSub := ps.subs[ps.groupName]
-	_, hasNodeSub := ps.subs[ps.nodeName]
+	_, hasGroupSub := ps.subs[ps.groupStream]
+	_, hasNodeSub := ps.subs[ps.nodeStream]
 	if hasGroupSub || hasNodeSub {
-		return errorf("already subscribed to group '%s'", ps.groupName)
+		return errorf("already subscribed to group '%s'", ps.groupStream)
 	}
 
-	groupSub, err := ps.PubSub.Subscribe(ps.groupName, "", h)
+	groupSub, err := ps.ps.Subscribe(ps.groupStream, "", h)
 	if err != nil {
 		return err
 	}
 
-	nodeSub, err := ps.PubSub.Subscribe(ps.nodeName, "", h)
+	nodeSub, err := ps.ps.Subscribe(ps.nodeStream, "", h)
 	if err != nil {
-		ps.unsubscribe(ps.groupName, groupSub)
+		ps.unsubscribe(ps.groupStream, groupSub)
 		return err
 	}
 
-	ps.subs[ps.groupName] = groupSub
-	ps.subs[ps.nodeName] = nodeSub
+	ps.subs[ps.groupStream] = groupSub
+	ps.subs[ps.nodeStream] = nodeSub
 	return nil
 }
 
 func (ps *pubsub) subscribe(stream string, h PubSubHandler) error {
-	sub, err := ps.PubSub.Subscribe(stream, ps.groupName, h)
+	ps.subsMtx.Lock()
+	defer ps.subsMtx.Unlock()
+
+	if _, has := ps.subs[stream]; has {
+		return errorf("already subscribed to '%s'", stream)
+	}
+
+	sub, err := ps.ps.Subscribe(stream, ps.groupStream, h)
 	if err != nil {
 		return err
 	}
 
-	ps.subsMtx.Lock()
-	_, has := ps.subs[stream]
-	if !has {
-		ps.subs[stream] = sub
-	}
-	ps.subsMtx.Unlock()
-
-	if has {
-		ps.unsubscribe(stream, sub)
-		return errorf("already subscribed to '%s'", stream)
-	}
+	ps.subs[stream] = sub
 	return nil
 }
 
@@ -130,7 +127,7 @@ func (ps *pubsub) shutdown() {
 	}
 }
 
-func nodeName(groupName string, nodeKey key) string {
+func nodeStream(groupName string, nodeKey key) string {
 	buf := alloc(len(groupName)+1+2*KeySize, nil)
 	n := copy(buf, groupName)
 	buf[n] = '.'

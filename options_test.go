@@ -44,8 +44,6 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 		t.Fatal("expected node id to be not empty")
 	case opts.store != defaultOpts.store:
 		t.Fatalf("unexpected store: %+v", opts.store)
-	case opts.storeFilter == nil:
-		t.Fatal("expected store filter to be set")
 	case opts.successorCount != defaultOpts.successorCount:
 		t.Fatalf("unexpected successor count: %d", opts.successorCount)
 	case opts.stabilizerCount != defaultOpts.stabilizerCount:
@@ -140,23 +138,6 @@ func TestOptionStorage(t *testing.T) {
 	}
 	if s, ok := opts.store.(*storeRecorder); !ok || s != store {
 		t.Fatalf("unexpected store: %+v", opts.store)
-	}
-}
-
-func TestOptionStorageFilter(t *testing.T) {
-	var opts options
-
-	err := opts.apply(StorageFilter(nil))
-	if err == nil {
-		t.Fatal("error expected, got none")
-	}
-
-	err = opts.apply(StorageFilter(func(string) bool { return true }))
-	switch {
-	case err != nil:
-		t.Fatalf("unexpected error: %v", err)
-	case opts.storeFilter == nil:
-		t.Fatal("expected store filter to be set")
 	}
 }
 

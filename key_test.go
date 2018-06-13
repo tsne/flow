@@ -360,6 +360,28 @@ func intKeys(ns ...int) keys {
 	return k
 }
 
+func equalKeys(left, right keys) bool {
+	return bytes.Equal(left, right)
+}
+
+func containsKey(haystack keys, needle key) bool {
+	for i, n := 0, haystack.length(); i < n; i++ {
+		if haystack.at(i).equal(needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAllKeys(haystack keys, needles ...key) bool {
+	for _, needle := range needles {
+		if !containsKey(haystack, needle) {
+			return false
+		}
+	}
+	return true
+}
+
 type printableKey key
 
 func (k printableKey) String() string {

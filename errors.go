@@ -3,8 +3,14 @@ package flow
 import "fmt"
 
 const (
-	errClosing       = errorString("closing")
-	errRespTimeout   = errorString("response timeout")
+	// ErrClosed is reported for a pending acknowledgement after
+	// the broker was closed.
+	ErrClosed = errorString("closed")
+
+	// ErrTimeout is reported when a request times out while waiting
+	// for a response.
+	ErrTimeout = errorString("timeout")
+
 	errMalformedKey  = errorString("malformed key")
 	errMalformedKeys = errorString("malformed keys")
 
@@ -13,9 +19,10 @@ const (
 	errMalformedLeave   = protocolError("malformed leave")
 	errMalformedInfo    = protocolError("malformed info")
 	errMalformedPing    = protocolError("malformed ping")
-	errMalformedAck     = protocolError("malformed ack")
-	errMalformedPub     = protocolError("malformed pub")
 	errMalformedFwd     = protocolError("malformed fwd")
+	errMalformedAck     = protocolError("malformed ack")
+	errMalformedReq     = protocolError("malformed req")
+	errMalformedResp    = protocolError("malformed resp")
 	errMalformedMessage = protocolError("malformed message")
 )
 
@@ -39,10 +46,4 @@ type protocolError string
 
 func (e protocolError) Error() string {
 	return "protocol error: " + string(e)
-}
-
-type ackError []byte
-
-func (e ackError) Error() string {
-	return string(e)
 }

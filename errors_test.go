@@ -22,10 +22,3 @@ func TestProtocolError(t *testing.T) {
 		t.Fatalf("unexpected error message: %s", err.Error())
 	}
 }
-
-func TestAckError(t *testing.T) {
-	err := ackError("error text")
-	if err.Error() != "error text" {
-		t.Fatalf("unexpected error message: %s", err.Error())
-	}
-}

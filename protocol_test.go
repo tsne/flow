@@ -154,30 +154,10 @@ func TestMarshalPing(t *testing.T) {
 
 func TestMarshalAck(t *testing.T) {
 	ack := ack{
-		id:  7,
-		err: ackError("error text"),
+		id: 7,
 	}
 
 	frame := marshalAck(ack, nil)
-	switch {
-	case frame.typ() != frameTypeAck:
-		t.Fatalf("unexpected frame type: %s", frame.typ())
-	case len(frame.payload()) != 18:
-		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
-	}
-
-	unmarshalled, err := unmarshalAck(frame)
-	switch {
-	case err != nil:
-		t.Fatalf("unexpected error: %v", err)
-	case !reflect.DeepEqual(ack, unmarshalled):
-		t.Fatalf("unexpected ack frame: %#v", unmarshalled)
-	}
-
-	// no error
-	ack.err = nil
-
-	frame = marshalAck(ack, nil)
 	switch {
 	case frame.typ() != frameTypeAck:
 		t.Fatalf("unexpected frame type: %s", frame.typ())
@@ -185,7 +165,7 @@ func TestMarshalAck(t *testing.T) {
 		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
-	unmarshalled, err = unmarshalAck(frame)
+	unmarshalled, err := unmarshalAck(frame)
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
@@ -197,9 +177,9 @@ func TestMarshalAck(t *testing.T) {
 func TestMarshalFwd(t *testing.T) {
 	keys := intKeys(1, 2)
 	fwd := fwd{
-		id:     7,
-		origin: keys.at(0),
-		key:    keys.at(1),
+		id:   7,
+		ack:  keys.at(0),
+		pkey: keys.at(1),
 		msg: Message{
 			Stream:       "stream",
 			Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),

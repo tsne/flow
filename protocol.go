@@ -31,6 +31,10 @@ const (
 	frameTypePing = frameType(uint('P')<<24 | uint('I')<<16 | uint('N')<<8 | uint('G'))
 	frameTypeFwd  = frameType(uint('F')<<24 | uint('W')<<16 | uint('D')<<8 | uint(' '))
 	frameTypeAck  = frameType(uint('A')<<24 | uint('C')<<16 | uint('K')<<8 | uint(' '))
+
+	// request/response
+	frameTypeReq  = frameType(uint('R')<<24 | uint('E')<<16 | uint('Q')<<8 | uint(' '))
+	frameTypeResp = frameType(uint('R')<<24 | uint('E')<<16 | uint('S')<<8 | uint('P'))
 )
 
 func (t frameType) String() string {
@@ -159,44 +163,12 @@ func unmarshalPing(f frame) (ping ping, err error) {
 	return ping, nil
 }
 
-// ack
-type ack struct {
-	id  uint64
-	err error
-}
-
-func marshalAck(ack ack, buf frame) frame {
-	var errtext string
-	if ack.err != nil {
-		errtext = ack.err.Error()
-	}
-
-	buf = newFrame(frameTypeAck, 8+len(errtext), buf)
-	p := buf.payload()
-	binary.BigEndian.PutUint64(p, ack.id)
-	copy(p[8:], errtext)
-	return buf
-}
-
-func unmarshalAck(f frame) (ack ack, err error) {
-	p := f.payload()
-	if len(p) < 8 {
-		return ack, errMalformedAck
-	}
-
-	ack.id = binary.BigEndian.Uint64(p)
-	if perr := p[8:]; len(perr) != 0 {
-		ack.err = ackError(perr)
-	}
-	return ack, nil
-}
-
 // fwd
 type fwd struct {
-	id     uint64
-	origin key
-	key    key
-	msg    Message
+	id   uint64
+	ack  key
+	pkey key
+	msg  Message
 }
 
 func marshalFwd(fwd fwd, buf frame) frame {
@@ -204,8 +176,8 @@ func marshalFwd(fwd fwd, buf frame) frame {
 	p := buf.payload()
 
 	binary.BigEndian.PutUint64(p, fwd.id)
-	copy(p[8:], fwd.origin)
-	copy(p[8+KeySize:], fwd.key)
+	copy(p[8:], fwd.ack)
+	copy(p[8+KeySize:], fwd.pkey)
 	marshalMessageInto(p[8+2*KeySize:], fwd.msg)
 	return buf
 }
@@ -217,12 +189,92 @@ func unmarshalFwd(f frame) (fwd fwd, err error) {
 	}
 
 	fwd.id = binary.BigEndian.Uint64(p)
-	fwd.origin = p[8 : 8+KeySize]
-	fwd.key = p[8+KeySize : 8+2*KeySize]
+	fwd.ack = p[8 : 8+KeySize]
+	fwd.pkey = p[8+KeySize : 8+2*KeySize]
 	if fwd.msg, err = unmarshalMessageFrom(p[8+2*KeySize:]); err != nil {
 		return fwd, errMalformedFwd
 	}
 	return fwd, nil
+}
+
+// ack
+type ack struct {
+	id uint64
+}
+
+func marshalAck(ack ack, buf frame) frame {
+	buf = newFrame(frameTypeAck, 8, buf)
+	binary.BigEndian.PutUint64(buf.payload(), ack.id)
+	return buf
+}
+
+func unmarshalAck(f frame) (ack ack, err error) {
+	p := f.payload()
+	if len(p) < 8 {
+		return ack, errMalformedAck
+	}
+
+	ack.id = binary.BigEndian.Uint64(p)
+	return ack, nil
+}
+
+// req
+type req struct {
+	id    uint64
+	reply key
+	msg   Message
+}
+
+func marshalReq(req req, buf frame) frame {
+	buf = newFrame(frameTypeReq, 8+KeySize+messageSize(req.msg), buf)
+	p := buf.payload()
+
+	binary.BigEndian.PutUint64(p, req.id)
+	copy(p[8:], req.reply)
+	marshalMessageInto(p[8+KeySize:], req.msg)
+	return buf
+}
+
+func unmarshalReq(f frame) (req req, err error) {
+	p := f.payload()
+	if len(p) < 8+KeySize {
+		return req, errMalformedReq
+	}
+
+	req.id = binary.BigEndian.Uint64(p)
+	req.reply = p[8 : 8+KeySize]
+	if req.msg, err = unmarshalMessageFrom(p[8+KeySize:]); err != nil {
+		return req, errMalformedReq
+	}
+	return req, nil
+}
+
+// resp
+type resp struct {
+	id  uint64
+	msg Message
+}
+
+func marshalResp(resp resp, buf frame) frame {
+	buf = newFrame(frameTypeResp, 8+messageSize(resp.msg), buf)
+	p := buf.payload()
+
+	binary.BigEndian.PutUint64(p, resp.id)
+	marshalMessageInto(p[8:], resp.msg)
+	return buf
+}
+
+func unmarshalResp(f frame) (resp resp, err error) {
+	p := f.payload()
+	if len(p) < 8 {
+		return resp, errMalformedResp
+	}
+
+	resp.id = binary.BigEndian.Uint64(p)
+	if resp.msg, err = unmarshalMessageFrom(p[8:]); err != nil {
+		return resp, errMalformedResp
+	}
+	return resp, nil
 }
 
 // utility functions
