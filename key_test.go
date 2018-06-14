@@ -373,15 +373,6 @@ func containsKey(haystack keys, needle key) bool {
 	return false
 }
 
-func containsAllKeys(haystack keys, needles ...key) bool {
-	for _, needle := range needles {
-		if !containsKey(haystack, needle) {
-			return false
-		}
-	}
-	return true
-}
-
 type printableKey key
 
 func (k printableKey) String() string {

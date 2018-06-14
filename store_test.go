@@ -16,7 +16,3 @@ func (r *storeRecorder) Store(msg Message) error {
 func (r *storeRecorder) countMessages() int {
 	return len(r.messages)
 }
-
-func (r *storeRecorder) message(idx int) *Message {
-	return &r.messages[idx]
-}

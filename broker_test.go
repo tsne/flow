@@ -736,19 +736,27 @@ func TestBrokerRequest(t *testing.T) {
 }
 
 func TestBrokerClose(t *testing.T) {
-	const groupName = "testgroup"
+	const (
+		groupName     = "testgroup"
+		messageStream = "my-message-stream"
+	)
+
+	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
+	errch := make(chan error, 1)
+	msg := Message{
+		Stream:       messageStream,
+		Time:         now,
+		PartitionKey: []byte("partition one"),
+		Data:         []byte("message data"),
+	}
 
 	pubsub := newPubsubRecorder()
 
 	local := intKey(1)
-	localStream := nodeStream(groupName, local)
-	localChan, localSub := pubsub.SubscribeChan(localStream)
-	defer localSub.Unsubscribe()
+	remote := BytesKey(msg.PartitionKey)
+	remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote[:]))
+	defer remoteSub.Unsubscribe()
 
-	remote := intKey(2)
-	//remoteStream := nodeStream(groupName, remote)
-
-	errch := make(chan error, 1)
 	b, err := NewBroker(pubsub,
 		NodeKey(local.array()),
 		Group(groupName),
@@ -763,27 +771,121 @@ func TestBrokerClose(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	b.routing.register(keys(remote))
+	b.routing.register(remote[:])
+	b.Subscribe(messageStream, func(msg Message) {
+		t.Fatal("unexpected message handler call")
+	})
 
 	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
-		pubsub.Publish(localStream, marshalFwd(fwd{
-			id:   13,
-			ack:  remote,
-			pkey: remote,
-		}, nil))
+		var codec DefaultCodec
+		pubsub.Publish(messageStream, codec.EncodeMessage(msg))
 	}()
 
-	// make sure the fwd message has been sent to the broker
-	<-localChan
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 
-	b.Close()
+		<-remoteChan // wait for fwd frame
+		if err := b.Close(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}()
+
 	if err := <-errch; err != ErrClosed {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestBrokerShutdown(t *testing.T) {
+	const (
+		groupName     = "testgroup"
+		messageStream = "my-message-stream"
+		requestStream = "my-request-stream"
+	)
+
+	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
+	local := intKey(1)
+	pubsub := newPubsubRecorder()
+
+	b, err := NewBroker(pubsub,
+		NodeKey(local.array()),
+		Group(groupName),
+		AckTimeout(time.Hour),            // disable ack timeouts
+		ResponseTimeout(time.Hour),       // disable response timeouts
+		StabilizationInterval(time.Hour), // disable stabilization
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	receivedMessage := make(chan struct{})
+	receivedRequest := make(chan struct{})
+	finishedMessage := make(chan struct{})
+
+	b.Subscribe(messageStream, func(msg Message) {
+		close(receivedMessage)
+		<-finishedMessage
+	})
+	b.SubscribeRequest(requestStream, func(msg Message) Message {
+		close(receivedRequest)
+		<-finishedMessage
+		return msg
+	})
+
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		var codec DefaultCodec
+		pubsub.Publish(messageStream, codec.EncodeMessage(Message{
+			Stream: messageStream,
+			Time:   now,
+			Data:   []byte("message data"),
+		}))
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		pubsub.Publish(requestStream, marshalReq(req{
+			id:    7,
+			reply: b.routing.local,
+			msg: Message{
+				Stream: requestStream,
+				Time:   now,
+				Data:   []byte("request data"),
+			},
+		}, nil))
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		<-receivedMessage
+		<-receivedRequest
+		if err := b.Shutdown(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		time.Sleep(1 * time.Millisecond)
+		close(finishedMessage)
+	}()
 }
 
 func TestBrokerStabilization(t *testing.T) {
@@ -809,7 +911,7 @@ func TestBrokerStabilization(t *testing.T) {
 				groupName: groupName,
 				nodeKey:   local,
 			}),
-			closing:     make(chan struct{}),
+			leaving:     make(chan struct{}),
 			pendingAcks: make(map[uint64]pendingAck),
 		}
 
@@ -833,7 +935,7 @@ func TestBrokerStabilization(t *testing.T) {
 			defer b.wg.Done()
 
 			frame := <-remoteChan
-			close(b.closing)
+			close(b.leaving)
 			if frame.typ() != frameTypePing {
 				t.Fatalf("unexpected frame type for %v: %s", remote, frame.typ())
 			}
@@ -880,7 +982,7 @@ func TestBrokerStabilization(t *testing.T) {
 			defer b.wg.Done()
 
 			frame := <-remoteChan
-			close(b.closing)
+			close(b.leaving)
 			if frame.typ() != frameTypePing {
 				t.Fatalf("unexpected frame type for %v: %s", remote, frame.typ())
 			}

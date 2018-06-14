@@ -118,7 +118,7 @@ func (ps *pubsub) unsubscribe(stream string, sub Subscription) {
 	}
 }
 
-func (ps *pubsub) shutdown() {
+func (ps *pubsub) unsubscribeAll() {
 	ps.subsMtx.Lock()
 	defer ps.subsMtx.Unlock()
 

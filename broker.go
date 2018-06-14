@@ -30,6 +30,10 @@ type pendingAck struct {
 // system. Each subscribed message is handled by the responsible
 // broker, which is determined by the respective node key.
 type Broker struct {
+	messageCount uint64
+	requestCount uint64
+	shuttingDown uint64
+
 	codec       Codec
 	onError     func(error)
 	ackTimeout  time.Duration
@@ -41,7 +45,7 @@ type Broker struct {
 	id      uint64
 
 	wg      sync.WaitGroup
-	closing chan struct{}
+	leaving chan struct{}
 
 	pendingAckMtx sync.Mutex
 	pendingAcks   map[uint64]pendingAck // id => pending ack
@@ -73,7 +77,7 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 		routing:      newRoutingTable(opts),
 		pubsub:       newPubSub(pubsub, opts),
 		store:        opts.store,
-		closing:      make(chan struct{}),
+		leaving:      make(chan struct{}),
 		pendingAcks:  make(map[uint64]pendingAck),
 		pendingResps: make(map[uint64]chan Message),
 	}
@@ -85,7 +89,7 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 
 	join := marshalJoin(join{sender: b.routing.local}, nil)
 	if err := b.pubsub.sendToGroup(join); err != nil {
-		b.pubsub.shutdown()
+		b.pubsub.unsubscribeAll()
 		return nil, err
 	}
 
@@ -95,32 +99,29 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 }
 
 // Close notifies all group members about a leaving broker and
-// diconnects from the pub/sub system.
+// disconnects from the pub/sub system.
 func (b *Broker) Close() error {
-	close(b.closing)
+	return b.shutdown(func() error { return nil })
+}
 
-	// send leave message
-	leave := marshalLeave(leave{node: b.routing.local}, nil)
-	if err := b.pubsub.sendToGroup(leave); err != nil {
-		b.onError(errorf("group broadcast: %v", err))
-	}
+// Shutdown gracefully shuts down the broker. It notifies all group
+// members about a leaving broker and waits until all messages and
+// requests are processed. If the given context expires before, the
+// context's error will be returned.
+func (b *Broker) Shutdown(ctx context.Context) error {
+	return b.shutdown(func() error {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
 
-	// cancel pending acks
-	b.pendingAckMtx.Lock()
-	ids := make([]uint64, 0, len(b.pendingAcks))
-	for id := range b.pendingAcks {
-		ids = append(ids, id)
-	}
-	b.pendingAckMtx.Unlock()
-	for _, id := range ids {
-		b.notifyAck(id, ErrClosed)
-	}
-
-	b.wg.Wait()
-
-	// shutdown pub/sub
-	b.pubsub.shutdown()
-	return nil
+		for atomic.LoadUint64(&b.messageCount) != 0 || atomic.LoadUint64(&b.requestCount) != 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			}
+		}
+		return nil
+	})
 }
 
 // Publish persists the message and publishes it to the pub/sub system.
@@ -129,6 +130,9 @@ func (b *Broker) Close() error {
 // All binary data of the passed message needs to be valid only during
 // the method call.
 func (b *Broker) Publish(msg Message) error {
+	if b.isShuttingDown() {
+		return ErrClosed
+	}
 	if err := msg.validate(); err != nil {
 		return err
 	}
@@ -145,6 +149,9 @@ func (b *Broker) Publish(msg Message) error {
 // All binary data of the passed message needs to be valid only during
 // the method call.
 func (b *Broker) Request(ctx context.Context, msg Message) (Message, error) {
+	if b.isShuttingDown() {
+		return Message{}, ErrClosed
+	}
 	if err := msg.validate(); err != nil {
 		return Message{}, err
 	}
@@ -199,6 +206,9 @@ func (b *Broker) SubscribeRequest(stream string, handler RequestHandler) error {
 }
 
 func (b *Broker) processMessage(stream string, data []byte) {
+	atomic.AddUint64(&b.messageCount, 1)
+	defer atomic.AddUint64(&b.messageCount, ^uint64(0))
+
 	var (
 		req req
 		err error
@@ -209,18 +219,18 @@ func (b *Broker) processMessage(stream string, data []byte) {
 		return
 	}
 
-	var (
-		buf  Key
-		pkey key
-	)
-	if len(req.msg.PartitionKey) != 0 {
-		buf = BytesKey(req.msg.PartitionKey)
-		pkey = buf[:]
+	if len(req.msg.PartitionKey) == 0 {
+		b.dispatchMsg(req)
+	} else {
+		pkey := BytesKey(req.msg.PartitionKey)
+		b.forward(req, pkey[:], b.dispatchMsg)
 	}
-	b.forward(req, pkey, b.dispatchMsg)
 }
 
 func (b *Broker) processRequest(stream string, data []byte) {
+	atomic.AddUint64(&b.requestCount, 1)
+	defer atomic.AddUint64(&b.requestCount, ^uint64(0))
+
 	frame, err := frameFromBytes(data)
 	switch {
 	case err != nil:
@@ -346,16 +356,12 @@ func (b *Broker) handleReq(frame frame) {
 		return
 	}
 
-	var (
-		buf  Key
-		pkey key
-	)
-	if len(req.msg.PartitionKey) != 0 {
-		buf = BytesKey(req.msg.PartitionKey)
-		pkey = buf[:]
+	if len(req.msg.PartitionKey) == 0 {
+		b.dispatchReq(req)
+	} else {
+		pkey := BytesKey(req.msg.PartitionKey)
+		b.forward(req, pkey[:], b.dispatchReq)
 	}
-
-	b.forward(req, pkey, b.dispatchReq)
 }
 
 func (b *Broker) handleResp(frame frame) {
@@ -384,11 +390,6 @@ func (b *Broker) dispatchReq(req req) {
 }
 
 func (b *Broker) forward(req req, pkey key, dispatch func(req)) {
-	if len(pkey) == 0 {
-		dispatch(req)
-		return
-	}
-
 	var (
 		id       uint64
 		errch    chan error
@@ -488,6 +489,38 @@ func (b *Broker) nextID() uint64 {
 	return atomic.AddUint64(&b.id, 1)
 }
 
+func (b *Broker) isShuttingDown() bool {
+	return atomic.LoadUint64(&b.shuttingDown) != 0
+}
+
+func (b *Broker) shutdown(wait func() error) error {
+	atomic.StoreUint64(&b.shuttingDown, 1)
+	close(b.leaving)
+
+	leave := marshalLeave(leave{node: b.routing.local}, nil)
+	err := b.pubsub.sendToGroup(leave)
+
+	if waitErr := wait(); waitErr != nil {
+		err = waitErr
+	}
+
+	b.pubsub.unsubscribeAll()
+
+	// cancel pending acks
+	b.pendingAckMtx.Lock()
+	ids := make([]uint64, 0, len(b.pendingAcks))
+	for id := range b.pendingAcks {
+		ids = append(ids, id)
+	}
+	b.pendingAckMtx.Unlock()
+	for _, id := range ids {
+		b.notifyAck(id, ErrClosed)
+	}
+
+	b.wg.Wait()
+	return err
+}
+
 func (b *Broker) stabilize(interval time.Duration) {
 	defer b.wg.Done()
 
@@ -503,7 +536,7 @@ func (b *Broker) stabilize(interval time.Duration) {
 	)
 	for {
 		select {
-		case <-b.closing:
+		case <-b.leaving:
 			return
 		case <-ticker.C:
 		}
