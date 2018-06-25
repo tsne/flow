@@ -41,7 +41,6 @@ type Broker struct {
 
 	routing routingTable
 	pubsub  pubsub
-	store   Store
 	id      uint64
 
 	wg      sync.WaitGroup
@@ -76,7 +75,6 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 		respTimeout:  opts.respTimeout,
 		routing:      newRoutingTable(opts),
 		pubsub:       newPubSub(pubsub, opts),
-		store:        opts.store,
 		leaving:      make(chan struct{}),
 		pendingAcks:  make(map[uint64]pendingAck),
 		pendingResps: make(map[uint64]chan Message),
@@ -134,10 +132,6 @@ func (b *Broker) Publish(msg Message) error {
 		return ErrClosed
 	}
 	if err := msg.validate(); err != nil {
-		return err
-	}
-
-	if err := b.store.Store(msg); err != nil {
 		return err
 	}
 	return b.pubsub.publish(msg.Stream, b.codec.EncodeMessage(msg))

@@ -10,11 +10,9 @@ import (
 
 func TestBrokerPublish(t *testing.T) {
 	pubsub := newPubsubRecorder()
-	store := newStoreRecorder()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
 	b, err := NewBroker(pubsub,
-		Storage(store),
 		StabilizationInterval(time.Hour), // disable stabilization
 	)
 	if err != nil {
@@ -28,11 +26,8 @@ func TestBrokerPublish(t *testing.T) {
 		Data:         []byte("message data"),
 	})
 
-	switch {
-	case err != nil:
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	case store.countMessages() != 1:
-		t.Fatalf("unexpected number of stored messages: %d", store.countMessages())
 	}
 }
 

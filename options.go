@@ -13,7 +13,6 @@ type Option func(*options) error
 
 type options struct {
 	codec        Codec
-	store        Store
 	errorHandler func(error)
 
 	groupName string
@@ -31,7 +30,6 @@ func defaultOptions() options {
 	// TODO: verify defaults
 	return options{
 		codec:        DefaultCodec{},
-		store:        nullStore{},
 		errorHandler: func(err error) { fmt.Fprintln(os.Stderr, err) },
 
 		groupName: "_flowgroup",
@@ -107,18 +105,6 @@ func NodeKey(k Key) Option {
 	return func(o *options) error {
 		o.nodeKey = alloc(KeySize, o.nodeKey)
 		copy(o.nodeKey, k[:])
-		return nil
-	}
-}
-
-// Storage assigns a storage system to the broker. Each published
-// message of this broker is stored using s as the storage engine.
-func Storage(s Store) Option {
-	return func(o *options) error {
-		if s == nil {
-			return optionError("no store specified")
-		}
-		o.store = s
 		return nil
 	}
 }

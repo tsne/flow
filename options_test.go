@@ -15,8 +15,6 @@ func TestDefaultOptions(t *testing.T) {
 		t.Fatal("expected error handler, got none")
 	case opts.groupName == "":
 		t.Fatal("unexpected empty group name")
-	case opts.store == nil:
-		t.Fatal("unexpected empty store")
 	case opts.successorCount == 0:
 		t.Fatal("unexpected successor count: 0")
 	case opts.stabilizerCount == 0:
@@ -42,8 +40,6 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 		t.Fatalf("unexpected group name: %s", opts.groupName)
 	case len(opts.nodeKey) == 0:
 		t.Fatal("expected node id to be not empty")
-	case opts.store != defaultOpts.store:
-		t.Fatalf("unexpected store: %+v", opts.store)
 	case opts.successorCount != defaultOpts.successorCount:
 		t.Fatalf("unexpected successor count: %d", opts.successorCount)
 	case opts.stabilizerCount != defaultOpts.stabilizerCount:
@@ -120,24 +116,6 @@ func TestOptionNodeKey(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	case !bytes.Equal(opts.nodeKey, key[:]):
 		t.Fatalf("unexpected node key: %s", printableKey(opts.nodeKey))
-	}
-}
-
-func TestOptionStorage(t *testing.T) {
-	var opts options
-
-	err := opts.apply(Storage(nil))
-	if err == nil {
-		t.Fatal("error expected, got none")
-	}
-
-	store := newStoreRecorder()
-	err = opts.apply(Storage(store))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if s, ok := opts.store.(*storeRecorder); !ok || s != store {
-		t.Fatalf("unexpected store: %+v", opts.store)
 	}
 }
 
