@@ -109,7 +109,7 @@ func TestOptionGroup(t *testing.T) {
 func TestOptionNodeKey(t *testing.T) {
 	var opts options
 
-	key := StringKey("node key")
+	key := KeyFromString("node key")
 	err := opts.apply(NodeKey(key))
 	switch {
 	case err != nil:

@@ -11,17 +11,16 @@ import (
 // The binary parts of the passed message should be assumed to be valid
 // only during the function call. It is the handler's responsibility to
 // copy the data which should be reused.
-type MessageHandler func(Message)
+type MessageHandler func(context.Context, Message)
 
 // RequestHandler represents a callback function for handling incoming requests.
 // The binary parts of the passed message should be assumed to be valid
 // only during the function call. It is the handler's responsibility to
 // copy the data which should be reused.
-type RequestHandler func(Message) Message
+type RequestHandler func(context.Context, Message) Message
 
 type pendingAck struct {
 	receiver key
-	timer    *time.Timer
 	errch    chan error
 }
 
@@ -30,14 +29,13 @@ type pendingAck struct {
 // system. Each subscribed message is handled by the responsible
 // broker, which is determined by the respective node key.
 type Broker struct {
-	messageCount uint64
-	requestCount uint64
-	shuttingDown uint64
+	messagesInFlight uint64
+	requestsInFlight uint64
+	shuttingDown     uint64
 
-	codec       Codec
-	onError     func(error)
-	ackTimeout  time.Duration
-	respTimeout time.Duration
+	codec      Codec
+	onError    func(error)
+	ackTimeout time.Duration
 
 	routing routingTable
 	pubsub  pubsub
@@ -59,10 +57,10 @@ type Broker struct {
 // NewBroker creates a new broker which uses the pub/sub system
 // for publishing messages and subscribing to streams.
 //
-// Because the PubSub interface does not contain a close operation,
+// Because pubsub could possibly be shared between multiple brokers,
 // the caller of this function is responsible for closing all
 // connections to the pub/sub system.
-func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
+func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error) {
 	opts := defaultOptions()
 	if err := opts.apply(o...); err != nil {
 		return nil, err
@@ -72,7 +70,6 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 		codec:        opts.codec,
 		onError:      opts.errorHandler,
 		ackTimeout:   opts.ackTimeout,
-		respTimeout:  opts.respTimeout,
 		routing:      newRoutingTable(opts),
 		pubsub:       newPubSub(pubsub, opts),
 		leaving:      make(chan struct{}),
@@ -80,14 +77,14 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 		pendingResps: make(map[uint64]chan Message),
 	}
 
-	err := b.pubsub.subscribeGroup(b.processGroupProtocol)
+	err := b.pubsub.subscribeGroup(ctx, b.processGroupProtocol)
 	if err != nil {
 		return nil, err
 	}
 
 	join := marshalJoin(join{sender: b.routing.local}, nil)
-	if err := b.pubsub.sendToGroup(join); err != nil {
-		b.pubsub.unsubscribeAll()
+	if err := b.pubsub.sendToGroup(ctx, join); err != nil {
+		b.pubsub.unsubscribeAll(ctx)
 		return nil, err
 	}
 
@@ -99,7 +96,7 @@ func NewBroker(pubsub PubSub, o ...Option) (*Broker, error) {
 // Close notifies all group members about a leaving broker and
 // disconnects from the pub/sub system.
 func (b *Broker) Close() error {
-	return b.shutdown(func() error { return nil })
+	return b.shutdown(context.Background(), func() error { return nil })
 }
 
 // Shutdown gracefully shuts down the broker. It notifies all group
@@ -107,11 +104,11 @@ func (b *Broker) Close() error {
 // requests are processed. If the given context expires before, the
 // context's error will be returned.
 func (b *Broker) Shutdown(ctx context.Context) error {
-	return b.shutdown(func() error {
+	return b.shutdown(ctx, func() error {
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
 
-		for atomic.LoadUint64(&b.messageCount) != 0 || atomic.LoadUint64(&b.requestCount) != 0 {
+		for atomic.LoadUint64(&b.messagesInFlight) != 0 || atomic.LoadUint64(&b.requestsInFlight) != 0 {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -127,14 +124,14 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 // by a random broker within a group.
 // All binary data of the passed message needs to be valid only during
 // the method call.
-func (b *Broker) Publish(msg Message) error {
+func (b *Broker) Publish(ctx context.Context, msg Message) error {
 	if b.isShuttingDown() {
 		return ErrClosed
 	}
 	if err := msg.validate(); err != nil {
 		return err
 	}
-	return b.pubsub.publish(msg.Stream, b.codec.EncodeMessage(msg))
+	return b.pubsub.publish(ctx, msg.Stream, b.codec.EncodeMessage(msg))
 }
 
 // Request sends a request message and waits for its response.
@@ -150,58 +147,39 @@ func (b *Broker) Request(ctx context.Context, msg Message) (Message, error) {
 		return Message{}, err
 	}
 
-	id := b.nextID()
-	msgch := make(chan Message, 1)
-
-	b.awaitResp(id, msgch)
-	err := b.pubsub.publish(msg.Stream, marshalReq(req{
-		id:    id,
+	return b.sendRequest(ctx, msg.Stream, req{
+		id:    b.nextID(),
 		reply: b.routing.local,
 		msg:   msg,
-	}, nil))
-	if err != nil {
-		b.notifyResp(id, Message{})
-	}
-
-	timer := startTimer(b.respTimeout)
-	defer stopTimer(timer)
-
-	select {
-	case <-timer.C:
-		return Message{}, ErrTimeout
-	case <-ctx.Done():
-		return Message{}, ctx.Err()
-	case resp := <-msgch:
-		return resp, err
-	}
+	})
 }
 
 // Subscribe subscribes to the messages of the specified stream.
 // These messsages are partitioned within the group the broker is
 // assigned to.
-func (b *Broker) Subscribe(stream string, handler MessageHandler) error {
+func (b *Broker) Subscribe(ctx context.Context, stream string, handler MessageHandler) error {
 	g, has := b.handlerGroups.LoadOrStore(stream, &handlerGroup{})
 	g.(*handlerGroup).add(handler)
 	if has {
 		return nil
 	}
-	return b.pubsub.subscribe(stream, b.processMessage)
+	return b.pubsub.subscribe(ctx, stream, b.processMessage)
 }
 
-// SubscribeRequest subscribes to the requests if the specified stream.
+// SubscribeRequest subscribes to the requests of the specified stream.
 // These requests are partitioned within the group the broker is
 // assigned to.
-func (b *Broker) SubscribeRequest(stream string, handler RequestHandler) error {
+func (b *Broker) SubscribeRequest(ctx context.Context, stream string, handler RequestHandler) error {
 	_, has := b.requestHandlers.LoadOrStore(stream, handler)
 	if has {
 		return errorf("already subscribed to '%s'", stream)
 	}
-	return b.pubsub.subscribe(stream, b.processRequest)
+	return b.pubsub.subscribe(ctx, stream, b.processRequest)
 }
 
-func (b *Broker) processMessage(stream string, data []byte) {
-	atomic.AddUint64(&b.messageCount, 1)
-	defer atomic.AddUint64(&b.messageCount, ^uint64(0))
+func (b *Broker) processMessage(ctx context.Context, stream string, data []byte) {
+	atomic.AddUint64(&b.messagesInFlight, 1)
+	defer atomic.AddUint64(&b.messagesInFlight, ^uint64(0))
 
 	var (
 		req req
@@ -214,16 +192,16 @@ func (b *Broker) processMessage(stream string, data []byte) {
 	}
 
 	if len(req.msg.PartitionKey) == 0 {
-		b.dispatchMsg(req)
+		b.dispatchMsg(ctx, req)
 	} else {
-		pkey := BytesKey(req.msg.PartitionKey)
-		b.forward(req, pkey[:], b.dispatchMsg)
+		pkey := KeyFromBytes(req.msg.PartitionKey)
+		b.forward(ctx, req, pkey[:], b.dispatchMsg)
 	}
 }
 
-func (b *Broker) processRequest(stream string, data []byte) {
-	atomic.AddUint64(&b.requestCount, 1)
-	defer atomic.AddUint64(&b.requestCount, ^uint64(0))
+func (b *Broker) processRequest(ctx context.Context, stream string, data []byte) {
+	atomic.AddUint64(&b.requestsInFlight, 1)
+	defer atomic.AddUint64(&b.requestsInFlight, ^uint64(0))
 
 	frame, err := frameFromBytes(data)
 	switch {
@@ -235,10 +213,10 @@ func (b *Broker) processRequest(stream string, data []byte) {
 		return
 	}
 
-	b.handleReq(frame)
+	b.handleReq(ctx, frame)
 }
 
-func (b *Broker) processGroupProtocol(stream string, data []byte) {
+func (b *Broker) processGroupProtocol(ctx context.Context, stream string, data []byte) {
 	frame, err := frameFromBytes(data)
 	if err != nil {
 		b.onError(errorf("group subscription: %v", err))
@@ -247,15 +225,15 @@ func (b *Broker) processGroupProtocol(stream string, data []byte) {
 
 	switch frame.typ() {
 	case frameTypeJoin:
-		b.handleJoin(frame)
+		b.handleJoin(ctx, frame)
 	case frameTypeLeave:
 		b.handleLeave(frame)
 	case frameTypeInfo:
 		b.handleInfo(frame)
 	case frameTypePing:
-		b.handlePing(frame)
+		b.handlePing(ctx, frame)
 	case frameTypeFwd:
-		b.handleFwd(frame)
+		b.handleFwd(ctx, frame)
 	case frameTypeAck:
 		b.handleAck(frame)
 	case frameTypeResp:
@@ -265,7 +243,7 @@ func (b *Broker) processGroupProtocol(stream string, data []byte) {
 	}
 }
 
-func (b *Broker) handleJoin(frame frame) {
+func (b *Broker) handleJoin(ctx context.Context, frame frame) {
 	join, err := unmarshalJoin(frame)
 	switch {
 	case err != nil:
@@ -279,7 +257,7 @@ func (b *Broker) handleJoin(frame frame) {
 	b.routing.register(keys(join.sender))
 
 	sender := join.sender.array()
-	b.sendTo(sender[:], marshalInfo(info{
+	b.sendTo(ctx, sender[:], marshalInfo(info{
 		neighbors: neighbors,
 	}, frame))
 }
@@ -305,7 +283,7 @@ func (b *Broker) handleInfo(frame frame) {
 	b.notifyAck(info.id, nil)
 }
 
-func (b *Broker) handlePing(frame frame) {
+func (b *Broker) handlePing(ctx context.Context, frame frame) {
 	ping, err := unmarshalPing(frame)
 	if err != nil {
 		b.onError(errorf("unmarshal ping: %v", err))
@@ -313,24 +291,24 @@ func (b *Broker) handlePing(frame frame) {
 	}
 
 	sender := ping.sender.array()
-	b.sendTo(sender[:], marshalInfo(info{
+	b.sendTo(ctx, sender[:], marshalInfo(info{
 		id:        ping.id,
 		neighbors: b.routing.neighbors(nil),
 	}, frame))
 }
 
-func (b *Broker) handleFwd(frame frame) {
+func (b *Broker) handleFwd(ctx context.Context, frame frame) {
 	fwd, err := unmarshalFwd(frame)
 	if err != nil {
 		b.onError(errorf("unmarshal fwd: %v", err))
 		return
 	}
 
-	b.sendTo(fwd.ack, marshalAck(ack{
+	b.sendTo(ctx, fwd.ack, marshalAck(ack{
 		id: fwd.id,
 	}, nil))
 
-	b.forward(req{msg: fwd.msg}, fwd.pkey, b.dispatchMsg)
+	b.forward(ctx, req{msg: fwd.msg}, fwd.pkey, b.dispatchMsg)
 }
 
 func (b *Broker) handleAck(frame frame) {
@@ -343,7 +321,7 @@ func (b *Broker) handleAck(frame frame) {
 	b.notifyAck(ack.id, nil)
 }
 
-func (b *Broker) handleReq(frame frame) {
+func (b *Broker) handleReq(ctx context.Context, frame frame) {
 	req, err := unmarshalReq(frame)
 	if err != nil {
 		b.onError(errorf("unmarshal req: %v", err))
@@ -351,10 +329,10 @@ func (b *Broker) handleReq(frame frame) {
 	}
 
 	if len(req.msg.PartitionKey) == 0 {
-		b.dispatchReq(req)
+		b.dispatchReq(ctx, req)
 	} else {
-		pkey := BytesKey(req.msg.PartitionKey)
-		b.forward(req, pkey[:], b.dispatchReq)
+		pkey := KeyFromBytes(req.msg.PartitionKey)
+		b.forward(ctx, req, pkey[:], b.dispatchReq)
 	}
 }
 
@@ -368,42 +346,36 @@ func (b *Broker) handleResp(frame frame) {
 	b.notifyResp(resp.id, resp.msg)
 }
 
-func (b *Broker) dispatchMsg(req req) {
+func (b *Broker) dispatchMsg(ctx context.Context, req req) {
 	if g, has := b.handlerGroups.Load(req.msg.Stream); has {
-		g.(*handlerGroup).dispatch(req.msg)
+		g.(*handlerGroup).dispatch(ctx, req.msg)
 	}
 }
 
-func (b *Broker) dispatchReq(req req) {
+func (b *Broker) dispatchReq(ctx context.Context, req req) {
 	if h, has := b.requestHandlers.Load(req.msg.Stream); has {
-		b.sendTo(req.reply, marshalResp(resp{
+		b.sendTo(ctx, req.reply, marshalResp(resp{
 			id:  req.id,
-			msg: h.(RequestHandler)(req.msg),
+			msg: h.(RequestHandler)(ctx, req.msg),
 		}, nil))
 	}
 }
 
-func (b *Broker) forward(req req, pkey key, dispatch func(req)) {
+func (b *Broker) forward(ctx context.Context, req req, pkey key, dispatch func(context.Context, req)) {
 	var (
 		id       uint64
-		errch    chan error
 		fwdframe frame
 		keybuf   Key
 	)
 	for {
 		succ := b.routing.successor(pkey[:], keybuf[:])
 		if len(succ) == 0 {
-			dispatch(req)
+			dispatch(ctx, req)
 			return
 		}
 
 		if len(fwdframe) == 0 {
 			id = b.nextID()
-			// We need a buffered channel here, because of the error
-			// handling below. If sending the message to the successor
-			// fails, notifyAck must not block while writing the error
-			// to the channel.
-			errch = make(chan error, 1)
 			fwdframe = marshalFwd(fwd{
 				id:   id,
 				ack:  b.routing.local,
@@ -412,14 +384,10 @@ func (b *Broker) forward(req req, pkey key, dispatch func(req)) {
 			}, nil)
 		}
 
-		b.awaitAck(succ, id, errch)
-		if err := b.pubsub.sendToNode(succ, fwdframe); err != nil {
-			b.notifyAck(id, err)
-		}
-
-		if err := <-errch; err == nil {
+		err := b.sendFrame(ctx, id, succ, fwdframe)
+		if err == nil {
 			return
-		} else if err != ErrTimeout {
+		} else if err != context.DeadlineExceeded {
 			b.onError(err)
 			return
 		}
@@ -430,51 +398,81 @@ func (b *Broker) forward(req req, pkey key, dispatch func(req)) {
 	}
 }
 
-func (b *Broker) awaitAck(receiver key, id uint64, errch chan error) {
+// send a frame to a node and wait for an ack
+func (b *Broker) sendFrame(ctx context.Context, ackID uint64, receiver key, frame frame) error {
+	errch := make(chan error, 1)
 	b.pendingAckMtx.Lock()
-	b.pendingAcks[id] = pendingAck{
+	b.pendingAcks[ackID] = pendingAck{
 		receiver: receiver,
 		errch:    errch,
-		timer: time.AfterFunc(b.ackTimeout, func() {
-			b.notifyAck(id, ErrTimeout)
-		}),
 	}
 	b.pendingAckMtx.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, b.ackTimeout)
+	defer cancel()
+
+	if err := b.pubsub.sendToNode(ctx, receiver, frame); err != nil {
+		b.notifyAck(ackID, err)
+	}
+
+	select {
+	case err := <-errch:
+		return err
+	case <-ctx.Done():
+		err := ctx.Err()
+		b.notifyAck(ackID, err)
+		return err
+	}
 }
 
-func (b *Broker) notifyAck(id uint64, err error) {
+func (b *Broker) notifyAck(ackID uint64, err error) {
 	b.pendingAckMtx.Lock()
-	ack, has := b.pendingAcks[id]
-	delete(b.pendingAcks, id)
+	ack, has := b.pendingAcks[ackID]
+	delete(b.pendingAcks, ackID)
 	b.pendingAckMtx.Unlock()
-	if !has {
-		return
+
+	if has {
+		if err == context.DeadlineExceeded {
+			b.routing.suspect(ack.receiver)
+		}
+		ack.errch <- err
 	}
-	ack.timer.Stop()
-	if err == ErrTimeout {
-		b.routing.suspect(ack.receiver)
-	}
-	ack.errch <- err
 }
 
-func (b *Broker) awaitResp(id uint64, msgch chan Message) {
+// send a request to a node and wait for a response
+func (b *Broker) sendRequest(ctx context.Context, stream string, req req) (Message, error) {
+	msgch := make(chan Message, 1)
 	b.pendingRespMtx.Lock()
-	b.pendingResps[id] = msgch
+	b.pendingResps[req.id] = msgch
 	b.pendingRespMtx.Unlock()
+
+	err := b.pubsub.publish(ctx, stream, marshalReq(req, nil))
+	if err != nil {
+		b.notifyResp(req.id, Message{})
+	}
+
+	select {
+	case msg := <-msgch:
+		return msg, err
+	case <-ctx.Done():
+		b.notifyResp(req.id, Message{})
+		return Message{}, ctx.Err()
+	}
 }
 
-func (b *Broker) notifyResp(id uint64, msg Message) {
+func (b *Broker) notifyResp(reqID uint64, msg Message) {
 	b.pendingRespMtx.Lock()
-	msgch, has := b.pendingResps[id]
-	delete(b.pendingResps, id)
+	msgch, has := b.pendingResps[reqID]
+	delete(b.pendingResps, reqID)
 	b.pendingRespMtx.Unlock()
+
 	if has {
 		msgch <- msg
 	}
 }
 
-func (b *Broker) sendTo(target key, frame frame) {
-	if err := b.pubsub.sendToNode(target, frame); err != nil {
+func (b *Broker) sendTo(ctx context.Context, target key, frame frame) {
+	if err := b.pubsub.sendToNode(ctx, target, frame); err != nil {
 		b.onError(errorf("send to node: %v", err))
 	}
 }
@@ -487,18 +485,18 @@ func (b *Broker) isShuttingDown() bool {
 	return atomic.LoadUint64(&b.shuttingDown) != 0
 }
 
-func (b *Broker) shutdown(wait func() error) error {
+func (b *Broker) shutdown(ctx context.Context, wait func() error) error {
 	atomic.StoreUint64(&b.shuttingDown, 1)
 	close(b.leaving)
 
 	leave := marshalLeave(leave{node: b.routing.local}, nil)
-	err := b.pubsub.sendToGroup(leave)
+	err := b.pubsub.sendToGroup(ctx, leave)
 
 	if waitErr := wait(); waitErr != nil {
 		err = waitErr
 	}
 
-	b.pubsub.unsubscribeAll()
+	b.pubsub.unsubscribeAll(ctx)
 
 	// cancel pending acks
 	b.pendingAckMtx.Lock()
@@ -526,8 +524,8 @@ func (b *Broker) stabilize(interval time.Duration) {
 		frame  frame
 		stabs  keys
 		nstabs int
-		errch  chan error
 	)
+
 	for {
 		select {
 		case <-b.leaving:
@@ -537,24 +535,14 @@ func (b *Broker) stabilize(interval time.Duration) {
 
 		stabs = b.routing.stabilizers(stabs)
 		nstabs = stabs.length()
-		if cap(errch) < nstabs {
-			errch = make(chan error, nstabs)
-		}
 
 		for i := 0; i < nstabs; i++ {
-			key := stabs.at(i)
+			stab := stabs.at(i)
 			ping.id = b.nextID()
 			frame = marshalPing(ping, frame)
 
-			b.awaitAck(key, ping.id, errch)
-			if err := b.pubsub.sendToNode(key, frame); err != nil {
-				b.notifyAck(ping.id, err)
-			}
-		}
-
-		// consume errors
-		for i := 0; i < nstabs; i++ {
-			if err := <-errch; err != nil && err != ErrClosed && err != ErrTimeout {
+			err := b.sendFrame(context.Background(), ping.id, stab, frame)
+			if err != nil && err != ErrClosed && err != context.DeadlineExceeded {
 				b.onError(errorf("stabilization: %v", err))
 			}
 		}
@@ -572,12 +560,12 @@ func (g *handlerGroup) add(h MessageHandler) {
 	g.mtx.Unlock()
 }
 
-func (g *handlerGroup) dispatch(msg Message) {
+func (g *handlerGroup) dispatch(ctx context.Context, msg Message) {
 	g.mtx.RLock()
 	handlers := g.handlers
 	g.mtx.RUnlock()
 
 	for _, h := range handlers {
-		h(msg)
+		h(ctx, msg)
 	}
 }

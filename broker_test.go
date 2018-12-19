@@ -9,17 +9,18 @@ import (
 )
 
 func TestBrokerPublish(t *testing.T) {
+	ctx := context.Background()
 	pubsub := newPubsubRecorder()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
-	b, err := NewBroker(pubsub,
+	b, err := NewBroker(ctx, pubsub,
 		StabilizationInterval(time.Hour), // disable stabilization
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	err = b.Publish(Message{
+	err = b.Publish(ctx, Message{
 		Stream:       "store-stream",
 		Time:         now,
 		PartitionKey: []byte("partition one"),
@@ -34,6 +35,7 @@ func TestBrokerPublish(t *testing.T) {
 func TestBrokerSubscription(t *testing.T) {
 	const groupName = "testgroup"
 
+	ctx := context.Background()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 	msg := Message{
 		Stream:       "message-stream",
@@ -42,11 +44,11 @@ func TestBrokerSubscription(t *testing.T) {
 		Data:         []byte("message data"),
 	}
 
-	local := BytesKey(msg.PartitionKey)
+	local := KeyFromBytes(msg.PartitionKey)
 	localStream := nodeStream(groupName, local[:])
 
 	pubsub := newPubsubRecorder()
-	b, err := NewBroker(pubsub,
+	b, err := NewBroker(ctx, pubsub,
 		Group(groupName),
 		NodeKey(local),
 		AckTimeout(time.Hour),            // disable ack timeouts
@@ -57,13 +59,13 @@ func TestBrokerSubscription(t *testing.T) {
 	}
 
 	messageChan := make(chan Message, 1)
-	err = b.Subscribe(msg.Stream, func(msg Message) { messageChan <- msg })
+	err = b.Subscribe(ctx, msg.Stream, func(_ context.Context, msg Message) { messageChan <- msg })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	t.Run("dispatch", func(t *testing.T) {
-		err := b.Publish(msg)
+		err := b.Publish(ctx, msg)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -79,13 +81,13 @@ func TestBrokerSubscription(t *testing.T) {
 		msg.PartitionKey = []byte("partition two")
 		defer func() { msg.PartitionKey = partitionKey }()
 
-		remote := BytesKey(msg.PartitionKey)
+		remote := KeyFromBytes(msg.PartitionKey)
 
 		b.routing.register(keys(remote[:]))
 		defer b.routing.unregister(remote[:])
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote[:]))
-		defer remoteSub.Unsubscribe()
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote[:]))
+		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
 		defer wg.Wait()
@@ -108,7 +110,7 @@ func TestBrokerSubscription(t *testing.T) {
 				t.Fatalf("unexpected fwd: %+v", fwd)
 			}
 
-			pubsub.Publish(localStream, marshalAck(ack{
+			pubsub.Publish(ctx, localStream, marshalAck(ack{
 				id: fwdID,
 			}, nil))
 
@@ -117,7 +119,7 @@ func TestBrokerSubscription(t *testing.T) {
 			}
 		}()
 
-		err := b.Publish(msg)
+		err := b.Publish(ctx, msg)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -132,13 +134,13 @@ func TestBrokerSubscription(t *testing.T) {
 		msg.PartitionKey = []byte("partition two")
 		defer func() { msg.PartitionKey = partitionKey }()
 
-		remote := BytesKey(msg.PartitionKey)
+		remote := KeyFromBytes(msg.PartitionKey)
 
 		b.routing.register(keys(remote[:]))
 		defer b.routing.unregister(remote[:])
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote[:]))
-		defer remoteSub.Unsubscribe()
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote[:]))
+		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
 		defer wg.Wait()
@@ -173,7 +175,7 @@ func TestBrokerSubscription(t *testing.T) {
 			}
 		}()
 
-		err := b.Publish(msg)
+		err := b.Publish(ctx, msg)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -183,6 +185,7 @@ func TestBrokerSubscription(t *testing.T) {
 func TestBrokerGroupProtocol(t *testing.T) {
 	const groupName = "testgroup"
 
+	ctx := context.Background()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
 	local := intKey(1)
@@ -192,11 +195,11 @@ func TestBrokerGroupProtocol(t *testing.T) {
 	remoteStream := nodeStream(groupName, remote)
 
 	pubsub := newPubsubRecorder()
-	groupChan, groupSub := pubsub.SubscribeChan(groupName)
-	defer groupSub.Unsubscribe()
+	groupChan, groupSub := pubsub.SubscribeChan(ctx, groupName)
+	defer groupSub.Unsubscribe(ctx)
 
-	remoteChan, remoteSub := pubsub.SubscribeChan(remoteStream)
-	defer remoteSub.Unsubscribe()
+	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, remoteStream)
+	defer remoteSub.Unsubscribe(ctx)
 
 	var wg sync.WaitGroup
 
@@ -217,17 +220,16 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			t.Fatalf("unexpected join: %+v", join)
 		}
 
-		pubsub.Publish(localStream, marshalInfo(info{
+		pubsub.Publish(ctx, localStream, marshalInfo(info{
 			id:        13,
 			neighbors: intKeys(101, 102, 103),
 		}, nil))
 	}()
 
-	b, err := NewBroker(pubsub,
+	b, err := NewBroker(ctx, pubsub,
 		NodeKey(local.array()),
 		Group(groupName),
 		AckTimeout(time.Hour),            // disable ack timeouts
-		ResponseTimeout(time.Hour),       // disable response timeouts
 		StabilizationInterval(time.Hour), // disable stabilization
 	)
 	if err != nil {
@@ -271,7 +273,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			}
 		}()
 
-		pubsub.Publish(groupName, marshalJoin(join{sender: remote}, nil))
+		pubsub.Publish(ctx, groupName, marshalJoin(join{sender: remote}, nil))
 
 		if !containsKey(keys(b.routing.keys), remote) {
 			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
@@ -304,7 +306,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			}
 		}()
 
-		pubsub.Publish(localStream, marshalPing(ping{
+		pubsub.Publish(ctx, localStream, marshalPing(ping{
 			id:     id,
 			sender: remote,
 		}, nil))
@@ -326,7 +328,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 		}
 
 		incoming := make(chan Message, 1)
-		err := b.Subscribe(msg.Stream, func(m Message) {
+		err := b.Subscribe(ctx, msg.Stream, func(_ context.Context, m Message) {
 			incoming <- m
 		})
 		if err != nil {
@@ -351,7 +353,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			}
 		}()
 
-		pubsub.Publish(localStream, marshalFwd(fwd{
+		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
 			id:   id,
 			ack:  remote,
 			pkey: local,
@@ -411,7 +413,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 				t.Fatalf("unexpected fwd: %+v", fwd)
 			}
 
-			pubsub.Publish(localStream, marshalAck(ack{
+			pubsub.Publish(ctx, localStream, marshalAck(ack{
 				id: fwdID,
 			}, nil))
 
@@ -420,7 +422,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			}
 		}()
 
-		pubsub.Publish(localStream, marshalFwd(fwd{
+		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
 			id:   id,
 			ack:  remote,
 			pkey: remote,
@@ -454,7 +456,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			defer func() { b.ackTimeout = ackTimeout }()
 
 			dispatched := make(chan Message, 1)
-			b.Subscribe(msg.Stream, func(msg Message) {
+			b.Subscribe(ctx, msg.Stream, func(_ context.Context, msg Message) {
 				dispatched <- msg
 			})
 
@@ -500,7 +502,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			b.routing.register(keys(remote))
 		}()
 
-		pubsub.Publish(localStream, marshalFwd(fwd{
+		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
 			id:   id,
 			ack:  remote,
 			pkey: remote,
@@ -519,7 +521,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			_ = <-groupChan // consume LEAV
 		}()
 
-		pubsub.Publish(groupName, marshalLeave(leave{node: remote}, nil))
+		pubsub.Publish(ctx, groupName, marshalLeave(leave{node: remote}, nil))
 
 		if containsKey(keys(b.routing.keys), remote) {
 			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
@@ -530,17 +532,17 @@ func TestBrokerGroupProtocol(t *testing.T) {
 func TestBrokerRequest(t *testing.T) {
 	const groupName = "testgroup"
 
+	ctx := context.Background()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
 	local := intKey(1)
 	localStream := nodeStream(groupName, local)
 
 	pubsub := newPubsubRecorder()
-	b, err := NewBroker(pubsub,
+	b, err := NewBroker(ctx, pubsub,
 		NodeKey(local.array()),
 		Group(groupName),
 		AckTimeout(time.Hour),            // disable ack timeouts
-		ResponseTimeout(time.Hour),       // disable response timeouts
 		StabilizationInterval(time.Hour), // disable stabilization
 	)
 	if err != nil {
@@ -562,7 +564,7 @@ func TestBrokerRequest(t *testing.T) {
 	}
 
 	t.Run("dispatch", func(t *testing.T) {
-		err = b.SubscribeRequest(request.Stream, func(msg Message) Message {
+		err = b.SubscribeRequest(ctx, request.Stream, func(_ context.Context, msg Message) Message {
 			if !equalMessage(msg, request) {
 				t.Fatalf("unexpected request: %+v", msg)
 			}
@@ -573,7 +575,7 @@ func TestBrokerRequest(t *testing.T) {
 		}
 		defer clearSubscriptions(b, request.Stream)
 
-		msg, err := b.Request(context.Background(), request)
+		msg, err := b.Request(ctx, request)
 		switch {
 		case err != nil:
 			t.Fatalf("unexpected error: %v", err)
@@ -583,7 +585,7 @@ func TestBrokerRequest(t *testing.T) {
 	})
 
 	t.Run("forward", func(t *testing.T) {
-		err := b.SubscribeRequest(request.Stream, func(msg Message) Message {
+		err := b.SubscribeRequest(ctx, request.Stream, func(_ context.Context, msg Message) Message {
 			t.Fatal("unexpected request handler call")
 			return msg
 		})
@@ -598,8 +600,8 @@ func TestBrokerRequest(t *testing.T) {
 		b.routing.register(keys(remote))
 		defer b.routing.unregister(remote)
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote))
-		defer remoteSub.Unsubscribe()
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote))
+		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
 		defer wg.Wait()
@@ -614,7 +616,7 @@ func TestBrokerRequest(t *testing.T) {
 			}
 
 			fwdID := lastID(b)
-			pkey := BytesKey(request.PartitionKey)
+			pkey := KeyFromBytes(request.PartitionKey)
 			fwd, err := unmarshalFwd(frame)
 			switch {
 			case err != nil:
@@ -623,16 +625,16 @@ func TestBrokerRequest(t *testing.T) {
 				t.Fatalf("unexpected fwd: %+v", fwd)
 			}
 
-			pubsub.Publish(localStream, marshalAck(ack{
+			pubsub.Publish(ctx, localStream, marshalAck(ack{
 				id: fwdID,
 			}, nil))
-			pubsub.Publish(localStream, marshalResp(resp{
+			pubsub.Publish(ctx, localStream, marshalResp(resp{
 				id:  reqID,
 				msg: response,
 			}, nil))
 		}()
 
-		msg, err := b.Request(context.Background(), request)
+		msg, err := b.Request(ctx, request)
 		switch {
 		case err != nil:
 			t.Fatalf("unexpected error: %v", err)
@@ -649,7 +651,7 @@ func TestBrokerRequest(t *testing.T) {
 		defer func() { b.ackTimeout = ackTimeout }()
 
 		requestChan := make(chan Message, 1)
-		err := b.SubscribeRequest(request.Stream, func(msg Message) Message {
+		err := b.SubscribeRequest(ctx, request.Stream, func(_ context.Context, msg Message) Message {
 			requestChan <- msg
 			return response
 		})
@@ -663,8 +665,8 @@ func TestBrokerRequest(t *testing.T) {
 
 		b.routing.register(keys(remote))
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote))
-		defer remoteSub.Unsubscribe()
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote))
+		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
 		defer wg.Wait()
@@ -679,7 +681,7 @@ func TestBrokerRequest(t *testing.T) {
 			}
 
 			fwdID := lastID(b)
-			pkey := BytesKey(request.PartitionKey)
+			pkey := KeyFromBytes(request.PartitionKey)
 			fwd, err := unmarshalFwd(frame)
 			switch {
 			case err != nil:
@@ -697,7 +699,7 @@ func TestBrokerRequest(t *testing.T) {
 			}
 		}()
 
-		msg, err := b.Request(context.Background(), request)
+		msg, err := b.Request(ctx, request)
 		switch {
 		case err != nil:
 			t.Fatalf("unexpected error: %v", err)
@@ -709,7 +711,7 @@ func TestBrokerRequest(t *testing.T) {
 	})
 
 	t.Run("deadline", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		ctx, cancel := context.WithTimeout(ctx, time.Millisecond)
 		defer cancel()
 
 		_, err := b.Request(ctx, request)
@@ -719,12 +721,11 @@ func TestBrokerRequest(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		respTimeout := b.respTimeout
-		b.respTimeout = time.Millisecond
-		defer func() { b.respTimeout = respTimeout }()
+		ctx, cancel := context.WithTimeout(ctx, time.Millisecond)
+		defer cancel()
 
-		_, err := b.Request(context.Background(), request)
-		if err != ErrTimeout {
+		_, err := b.Request(ctx, request)
+		if err != context.DeadlineExceeded {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -736,6 +737,7 @@ func TestBrokerClose(t *testing.T) {
 		messageStream = "my-message-stream"
 	)
 
+	ctx := context.Background()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 	errch := make(chan error, 1)
 	msg := Message{
@@ -748,15 +750,14 @@ func TestBrokerClose(t *testing.T) {
 	pubsub := newPubsubRecorder()
 
 	local := intKey(1)
-	remote := BytesKey(msg.PartitionKey)
-	remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote[:]))
-	defer remoteSub.Unsubscribe()
+	remote := KeyFromBytes(msg.PartitionKey)
+	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote[:]))
+	defer remoteSub.Unsubscribe(ctx)
 
-	b, err := NewBroker(pubsub,
+	b, err := NewBroker(ctx, pubsub,
 		NodeKey(local.array()),
 		Group(groupName),
 		AckTimeout(time.Hour),            // disable ack timeouts
-		ResponseTimeout(time.Hour),       // disable response timeouts
 		StabilizationInterval(time.Hour), // disable stabilization
 		ErrorHandler(func(err error) {
 			errch <- err
@@ -767,7 +768,7 @@ func TestBrokerClose(t *testing.T) {
 	}
 
 	b.routing.register(remote[:])
-	b.Subscribe(messageStream, func(msg Message) {
+	b.Subscribe(ctx, messageStream, func(_ context.Context, msg Message) {
 		t.Fatal("unexpected message handler call")
 	})
 
@@ -779,7 +780,7 @@ func TestBrokerClose(t *testing.T) {
 		defer wg.Done()
 
 		var codec DefaultCodec
-		pubsub.Publish(messageStream, codec.EncodeMessage(msg))
+		pubsub.Publish(ctx, messageStream, codec.EncodeMessage(msg))
 	}()
 
 	wg.Add(1)
@@ -804,15 +805,15 @@ func TestBrokerShutdown(t *testing.T) {
 		requestStream = "my-request-stream"
 	)
 
+	ctx := context.Background()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 	local := intKey(1)
 	pubsub := newPubsubRecorder()
 
-	b, err := NewBroker(pubsub,
+	b, err := NewBroker(ctx, pubsub,
 		NodeKey(local.array()),
 		Group(groupName),
 		AckTimeout(time.Hour),            // disable ack timeouts
-		ResponseTimeout(time.Hour),       // disable response timeouts
 		StabilizationInterval(time.Hour), // disable stabilization
 	)
 	if err != nil {
@@ -823,11 +824,11 @@ func TestBrokerShutdown(t *testing.T) {
 	receivedRequest := make(chan struct{})
 	finishedMessage := make(chan struct{})
 
-	b.Subscribe(messageStream, func(msg Message) {
+	b.Subscribe(ctx, messageStream, func(_ context.Context, msg Message) {
 		close(receivedMessage)
 		<-finishedMessage
 	})
-	b.SubscribeRequest(requestStream, func(msg Message) Message {
+	b.SubscribeRequest(ctx, requestStream, func(_ context.Context, msg Message) Message {
 		close(receivedRequest)
 		<-finishedMessage
 		return msg
@@ -841,7 +842,7 @@ func TestBrokerShutdown(t *testing.T) {
 		defer wg.Done()
 
 		var codec DefaultCodec
-		pubsub.Publish(messageStream, codec.EncodeMessage(Message{
+		pubsub.Publish(ctx, messageStream, codec.EncodeMessage(Message{
 			Stream: messageStream,
 			Time:   now,
 			Data:   []byte("message data"),
@@ -852,7 +853,7 @@ func TestBrokerShutdown(t *testing.T) {
 	go func() {
 		defer wg.Done()
 
-		pubsub.Publish(requestStream, marshalReq(req{
+		pubsub.Publish(ctx, requestStream, marshalReq(req{
 			id:    7,
 			reply: b.routing.local,
 			msg: Message{
@@ -869,7 +870,7 @@ func TestBrokerShutdown(t *testing.T) {
 
 		<-receivedMessage
 		<-receivedRequest
-		if err := b.Shutdown(context.Background()); err != nil {
+		if err := b.Shutdown(ctx); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	}()
@@ -886,14 +887,16 @@ func TestBrokerShutdown(t *testing.T) {
 func TestBrokerStabilization(t *testing.T) {
 	const groupName = "testgroup"
 
+	ctx := context.Background()
+
 	local := intKey(1)
 	localStream := nodeStream(groupName, local)
 
 	remote := intKey(11)
 
 	pubsub := newPubsubRecorder()
-	remoteChan, remoteSub := pubsub.SubscribeChan(nodeStream(groupName, remote))
-	defer remoteSub.Unsubscribe()
+	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote))
+	defer remoteSub.Unsubscribe(ctx)
 
 	newBroker := func(ackTimeout time.Duration) (*Broker, error) {
 		b := &Broker{
@@ -912,7 +915,7 @@ func TestBrokerStabilization(t *testing.T) {
 
 		b.routing.register(keys(remote))
 
-		err := b.pubsub.subscribeGroup(b.processGroupProtocol)
+		err := b.pubsub.subscribeGroup(ctx, b.processGroupProtocol)
 		return b, err
 	}
 
@@ -945,7 +948,7 @@ func TestBrokerStabilization(t *testing.T) {
 				t.Fatalf("unexpected ping: %+v", ping)
 			}
 
-			pubsub.Publish(localStream, marshalInfo(info{
+			pubsub.Publish(ctx, localStream, marshalInfo(info{
 				id:        pingID,
 				neighbors: keys(remote),
 			}, nil))
@@ -1010,7 +1013,7 @@ func clearSubscriptions(b *Broker, stream string) {
 	b.pubsub.subsMtx.Unlock()
 
 	if has {
-		sub.Unsubscribe()
+		sub.Unsubscribe(context.Background())
 		b.handlerGroups.Delete(stream)
 		b.requestHandlers.Delete(stream)
 	}

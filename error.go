@@ -7,10 +7,6 @@ const (
 	// the broker was closed.
 	ErrClosed = errorString("closed")
 
-	// ErrTimeout is reported when a request times out while waiting
-	// for a response.
-	ErrTimeout = errorString("timeout")
-
 	errMalformedKey  = errorString("malformed key")
 	errMalformedKeys = errorString("malformed keys")
 

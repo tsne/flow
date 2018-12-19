@@ -13,14 +13,14 @@ const KeySize = sha1.Size
 // for partitioning.
 type Key [KeySize]byte
 
-// BytesKey returns a key for the given bytes.
-func BytesKey(p []byte) Key {
+// KeyFromBytes returns a key for the given bytes.
+func KeyFromBytes(p []byte) Key {
 	return Key(sha1.Sum(p))
 }
 
-// StringKey returns a key for the given string.
-func StringKey(s string) Key {
-	return BytesKey([]byte(s))
+// KeyFromString returns a key for the given string.
+func KeyFromString(s string) Key {
+	return KeyFromBytes([]byte(s))
 }
 
 // String returns a string representation of the key.

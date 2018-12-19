@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"context"
 	"sync"
 )
 
@@ -11,7 +12,7 @@ type subscription struct {
 	unsubscribe func() error
 }
 
-func (s *subscription) Unsubscribe() error {
+func (s *subscription) Unsubscribe(ctx context.Context) error {
 	return s.unsubscribe()
 }
 
@@ -27,18 +28,18 @@ func newPubsubRecorder() *pubsubRecorder {
 	}
 }
 
-func (r *pubsubRecorder) Publish(stream string, data []byte) error {
+func (r *pubsubRecorder) Publish(ctx context.Context, stream string, data []byte) error {
 	r.subMtx.Lock()
 	subs := r.subs[stream]
 	r.subMtx.Unlock()
 
 	for _, sub := range subs {
-		sub.h(stream, data)
+		sub.h(ctx, stream, data)
 	}
 	return nil
 }
 
-func (r *pubsubRecorder) Subscribe(stream, group string, h PubSubHandler) (Subscription, error) {
+func (r *pubsubRecorder) Subscribe(ctx context.Context, stream, group string, h PubSubHandler) (Subscription, error) {
 	sub := &subscription{h: h}
 	sub.unsubscribe = func() error { return r.unsubscribe(stream, sub) }
 
@@ -48,9 +49,9 @@ func (r *pubsubRecorder) Subscribe(stream, group string, h PubSubHandler) (Subsc
 	return sub, nil
 }
 
-func (r *pubsubRecorder) SubscribeChan(stream string) (<-chan frame, Subscription) {
+func (r *pubsubRecorder) SubscribeChan(ctx context.Context, stream string) (<-chan frame, Subscription) {
 	ch := make(chan frame)
-	sub, _ := r.Subscribe(stream, "", func(_ string, data []byte) {
+	sub, _ := r.Subscribe(ctx, stream, "", func(_ context.Context, _ string, data []byte) {
 		ch <- data
 	})
 	return ch, sub

@@ -1,17 +1,18 @@
 package flow
 
 import (
+	"context"
 	"encoding/hex"
 	"sync"
 )
 
 // PubSubHandler represents a handler for the plugged-in pub/sub system.
 // The data can be assumed as valid only during the function call.
-type PubSubHandler func(stream string, data []byte)
+type PubSubHandler func(ctx context.Context, stream string, data []byte)
 
 // Subscription defines an interface for an interest in a given stream.
 type Subscription interface {
-	Unsubscribe() error
+	Unsubscribe(ctx context.Context) error
 }
 
 // PubSub defines an interface for the pluggable pub/sub system.
@@ -32,8 +33,8 @@ type Subscription interface {
 // returns. It is the subscriber's responsibility to copy the data that
 // should be reused.
 type PubSub interface {
-	Publish(stream string, data []byte) error
-	Subscribe(stream, group string, h PubSubHandler) (Subscription, error)
+	Publish(ctx context.Context, stream string, data []byte) error
+	Subscribe(ctx context.Context, stream, group string, h PubSubHandler) (Subscription, error)
 }
 
 type pubsub struct {
@@ -56,20 +57,20 @@ func newPubSub(ps PubSub, opts options) pubsub {
 	}
 }
 
-func (ps *pubsub) sendToGroup(data []byte) error {
-	return ps.ps.Publish(ps.groupStream, data)
+func (ps *pubsub) sendToGroup(ctx context.Context, data []byte) error {
+	return ps.ps.Publish(ctx, ps.groupStream, data)
 }
 
-func (ps *pubsub) sendToNode(target key, data []byte) error {
+func (ps *pubsub) sendToNode(ctx context.Context, target key, data []byte) error {
 	stream := nodeStream(ps.groupStream, target)
-	return ps.ps.Publish(stream, data)
+	return ps.ps.Publish(ctx, stream, data)
 }
 
-func (ps *pubsub) publish(stream string, data []byte) error {
-	return ps.ps.Publish(stream, data)
+func (ps *pubsub) publish(ctx context.Context, stream string, data []byte) error {
+	return ps.ps.Publish(ctx, stream, data)
 }
 
-func (ps *pubsub) subscribeGroup(h PubSubHandler) error {
+func (ps *pubsub) subscribeGroup(ctx context.Context, h PubSubHandler) error {
 	ps.subsMtx.Lock()
 	defer ps.subsMtx.Unlock()
 
@@ -79,14 +80,14 @@ func (ps *pubsub) subscribeGroup(h PubSubHandler) error {
 		return errorf("already subscribed to group '%s'", ps.groupStream)
 	}
 
-	groupSub, err := ps.ps.Subscribe(ps.groupStream, "", h)
+	groupSub, err := ps.ps.Subscribe(ctx, ps.groupStream, "", h)
 	if err != nil {
 		return err
 	}
 
-	nodeSub, err := ps.ps.Subscribe(ps.nodeStream, "", h)
+	nodeSub, err := ps.ps.Subscribe(ctx, ps.nodeStream, "", h)
 	if err != nil {
-		ps.unsubscribe(ps.groupStream, groupSub)
+		ps.unsubscribe(ctx, ps.groupStream, groupSub)
 		return err
 	}
 
@@ -95,7 +96,7 @@ func (ps *pubsub) subscribeGroup(h PubSubHandler) error {
 	return nil
 }
 
-func (ps *pubsub) subscribe(stream string, h PubSubHandler) error {
+func (ps *pubsub) subscribe(ctx context.Context, stream string, h PubSubHandler) error {
 	ps.subsMtx.Lock()
 	defer ps.subsMtx.Unlock()
 
@@ -103,7 +104,7 @@ func (ps *pubsub) subscribe(stream string, h PubSubHandler) error {
 		return errorf("already subscribed to '%s'", stream)
 	}
 
-	sub, err := ps.ps.Subscribe(stream, ps.groupStream, h)
+	sub, err := ps.ps.Subscribe(ctx, stream, ps.groupStream, h)
 	if err != nil {
 		return err
 	}
@@ -112,18 +113,18 @@ func (ps *pubsub) subscribe(stream string, h PubSubHandler) error {
 	return nil
 }
 
-func (ps *pubsub) unsubscribe(stream string, sub Subscription) {
-	if err := sub.Unsubscribe(); err != nil {
+func (ps *pubsub) unsubscribe(ctx context.Context, stream string, sub Subscription) {
+	if err := sub.Unsubscribe(ctx); err != nil {
 		ps.onError(errorf("error unsubscribing from '%s'", stream))
 	}
 }
 
-func (ps *pubsub) unsubscribeAll() {
+func (ps *pubsub) unsubscribeAll(ctx context.Context) {
 	ps.subsMtx.Lock()
 	defer ps.subsMtx.Unlock()
 
 	for stream, sub := range ps.subs {
-		ps.unsubscribe(stream, sub)
+		ps.unsubscribe(ctx, stream, sub)
 	}
 }
 

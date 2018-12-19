@@ -20,6 +20,7 @@ The underlying pub/sub system needs to support queue grouping, i.e. a message is
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -37,7 +38,8 @@ func main() {
 	}
 	defer pubsub.Close()
 
-	b, err := flow.NewBroker(pubsub,
+	ctx := context.Background()
+	b, err := flow.NewBroker(ctx, pubsub,
 		flow.Group("<group-name>"),
 		flow.NodeKey(flow.StringKey("<node-name>")),
 	)
@@ -47,7 +49,7 @@ func main() {
 	defer b.Close()
 
 	// subscribe messages
-	err = b.Subscribe(stream, func(msg flow.Message) {
+	err = b.Subscribe(ctx, stream, func(_ context.Context, msg flow.Message) {
 		tm := msg.Time.Format("2006-01-02 15:04:05 MST")
 		fmt.Printf("message@%s: %s\n", tm, msg.Data)
 	})
@@ -59,7 +61,7 @@ func main() {
 	var count int
 	for tm := range time.Tick(time.Second) {
 		count++
-		err := b.Publish(flow.Message{
+		err := b.Publish(ctx, flow.Message{
 			Stream: stream,
 			Time:   tm,
 			Data:   []byte(fmt.Sprintf("hello flow %d", count)),

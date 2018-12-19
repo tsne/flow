@@ -23,7 +23,6 @@ type options struct {
 
 	stabilizationInterval time.Duration
 	ackTimeout            time.Duration
-	respTimeout           time.Duration
 }
 
 func defaultOptions() options {
@@ -40,7 +39,6 @@ func defaultOptions() options {
 
 		stabilizationInterval: 10 * time.Second,
 		ackTimeout:            750 * time.Millisecond,
-		respTimeout:           1500 * time.Millisecond,
 	}
 }
 
@@ -152,18 +150,6 @@ func AckTimeout(d time.Duration) Option {
 			return optionError("non-positive ack timeout")
 		}
 		o.ackTimeout = d
-		return nil
-	}
-}
-
-// ResponseTimeout defines the timeout for receiving a response
-// of a request.
-func ResponseTimeout(d time.Duration) Option {
-	return func(o *options) error {
-		if d <= 0 {
-			return optionError("non-positive response timeout")
-		}
-		o.respTimeout = d
 		return nil
 	}
 }

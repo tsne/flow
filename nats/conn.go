@@ -1,6 +1,7 @@
 package nats
 
 import (
+	"context"
 	"strings"
 	"unicode"
 
@@ -11,7 +12,7 @@ import (
 
 // Conn represents a connection to a NATS server.
 type Conn struct {
-	*nats.Conn // reuse the Publish method
+	*nats.Conn
 }
 
 // Connect connects to the NATS servers with the given addresses.
@@ -36,13 +37,28 @@ func (c Conn) Close() error {
 	return nil
 }
 
+// Publish publishes data to the specified stream.
+func (c Conn) Publish(ctx context.Context, stream string, data []byte) error {
+	return c.Conn.Publish(stream, data)
+}
+
 // Subscribe installs a handler for the specified stream. The handler shares
 // the incoming message stream with other handlers of the same group. If
 // the group is empty, a separate stream will be assigned to the handler.
-func (c Conn) Subscribe(stream, group string, h flow.PubSubHandler) (flow.Subscription, error) {
-	return c.Conn.QueueSubscribe(stream, group, func(msg *nats.Msg) {
-		h(msg.Subject, msg.Data)
+func (c Conn) Subscribe(ctx context.Context, stream, group string, h flow.PubSubHandler) (flow.Subscription, error) {
+	handlerCtx := context.Background()
+	sub, err := c.Conn.QueueSubscribe(stream, group, func(msg *nats.Msg) {
+		h(handlerCtx, msg.Subject, msg.Data)
 	})
+	return subscription{sub}, err
+}
+
+type subscription struct {
+	*nats.Subscription
+}
+
+func (s subscription) Unsubscribe(ctx context.Context) error {
+	return s.Subscription.Unsubscribe()
 }
 
 func splitAddresses(a string) []string {
