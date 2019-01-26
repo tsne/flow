@@ -2,6 +2,7 @@ package flow
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
 )
@@ -23,6 +24,16 @@ func KeyFromString(s string) Key {
 	return KeyFromBytes([]byte(s))
 }
 
+// RandomKey returns a randomly generated key. If the random
+// number generator fails to read KeySize bytes, it will panic.
+func RandomKey() Key {
+	var k Key
+	if err := randomKey(k[:]); err != nil {
+		panic(err)
+	}
+	return k
+}
+
 // String returns a string representation of the key.
 func (k Key) String() string {
 	var buf [2 * KeySize]byte
@@ -37,6 +48,11 @@ func keyFromBytes(p []byte) (key, error) {
 		return nil, errMalformedKey
 	}
 	return key(p), nil
+}
+
+func randomKey(k key) error {
+	_, err := rand.Read(k)
+	return err
 }
 
 func (k key) equal(other key) bool {

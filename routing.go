@@ -17,8 +17,8 @@ type routingTable struct {
 func newRoutingTable(opts options) routingTable {
 	return routingTable{
 		local:           opts.nodeKey,
-		successorCount:  opts.successorCount,
-		stabilizerCount: opts.stabilizerCount,
+		successorCount:  opts.stabilization.Successors,
+		stabilizerCount: opts.stabilization.Stabilizers,
 	}
 }
 

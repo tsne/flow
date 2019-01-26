@@ -50,8 +50,8 @@ type Broker struct {
 	pendingRespMtx sync.Mutex
 	pendingResps   map[uint64]chan Message // id => response channel
 
-	handlerGroups   sync.Map // stream => handler group
-	requestHandlers sync.Map // stream => request handler
+	messageHandlers map[string][]MessageHandler // stream => message handlers
+	requestHandlers map[string]RequestHandler   // stream => request handler
 }
 
 // NewBroker creates a new broker which uses the pub/sub system
@@ -67,19 +67,35 @@ func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error)
 	}
 
 	b := &Broker{
-		codec:        opts.codec,
-		onError:      opts.errorHandler,
-		ackTimeout:   opts.ackTimeout,
-		routing:      newRoutingTable(opts),
-		pubsub:       newPubSub(pubsub, opts),
-		leaving:      make(chan struct{}),
-		pendingAcks:  make(map[uint64]pendingAck),
-		pendingResps: make(map[uint64]chan Message),
+		codec:           opts.codec,
+		onError:         opts.errorHandler,
+		ackTimeout:      opts.ackTimeout,
+		routing:         newRoutingTable(opts),
+		pubsub:          newPubSub(pubsub, opts),
+		leaving:         make(chan struct{}),
+		pendingAcks:     make(map[uint64]pendingAck),
+		pendingResps:    make(map[uint64]chan Message),
+		messageHandlers: opts.messageHandlers,
+		requestHandlers: opts.requestHandlers,
 	}
 
 	err := b.pubsub.subscribeGroup(ctx, b.processGroupProtocol)
 	if err != nil {
 		return nil, err
+	}
+
+	for stream := range b.messageHandlers {
+		if err := b.pubsub.subscribe(ctx, stream, b.processMessage); err != nil {
+			b.pubsub.unsubscribeAll(ctx)
+			return nil, err
+		}
+	}
+
+	for stream := range b.requestHandlers {
+		if err := b.pubsub.subscribe(ctx, stream, b.processRequest); err != nil {
+			b.pubsub.unsubscribeAll(ctx)
+			return nil, err
+		}
 	}
 
 	join := marshalJoin(join{sender: b.routing.local}, nil)
@@ -89,7 +105,7 @@ func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error)
 	}
 
 	b.wg.Add(1)
-	go b.stabilize(opts.stabilizationInterval)
+	go b.stabilize(opts.stabilization.Interval)
 	return b, nil
 }
 
@@ -119,9 +135,9 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 	})
 }
 
-// Publish persists the message and publishes it to the pub/sub system.
-// If the message has no partition key, the message will be processed
-// by a random broker within a group.
+// Publish forwards the message directly to the pub/sub system.
+// If the message does not contain any partition key, the message will
+// be processed by a random broker within a group.
 // All binary data of the passed message needs to be valid only during
 // the method call.
 func (b *Broker) Publish(ctx context.Context, msg Message) error {
@@ -152,29 +168,6 @@ func (b *Broker) Request(ctx context.Context, msg Message) (Message, error) {
 		reply: b.routing.local,
 		msg:   msg,
 	})
-}
-
-// Subscribe subscribes to the messages of the specified stream.
-// These messsages are partitioned within the group the broker is
-// assigned to.
-func (b *Broker) Subscribe(ctx context.Context, stream string, handler MessageHandler) error {
-	g, has := b.handlerGroups.LoadOrStore(stream, &handlerGroup{})
-	g.(*handlerGroup).add(handler)
-	if has {
-		return nil
-	}
-	return b.pubsub.subscribe(ctx, stream, b.processMessage)
-}
-
-// SubscribeRequest subscribes to the requests of the specified stream.
-// These requests are partitioned within the group the broker is
-// assigned to.
-func (b *Broker) SubscribeRequest(ctx context.Context, stream string, handler RequestHandler) error {
-	_, has := b.requestHandlers.LoadOrStore(stream, handler)
-	if has {
-		return errorf("already subscribed to '%s'", stream)
-	}
-	return b.pubsub.subscribe(ctx, stream, b.processRequest)
 }
 
 func (b *Broker) processMessage(ctx context.Context, stream string, data []byte) {
@@ -347,20 +340,21 @@ func (b *Broker) handleResp(frame frame) {
 }
 
 func (b *Broker) dispatchMsg(ctx context.Context, req req) {
-	if g, has := b.handlerGroups.Load(req.msg.Stream); has {
-		g.(*handlerGroup).dispatch(ctx, req.msg)
+	for _, h := range b.messageHandlers[req.msg.Stream] {
+		h(ctx, req.msg)
 	}
 }
 
 func (b *Broker) dispatchReq(ctx context.Context, req req) {
-	if h, has := b.requestHandlers.Load(req.msg.Stream); has {
+	if h := b.requestHandlers[req.msg.Stream]; h != nil {
 		b.sendTo(ctx, req.reply, marshalResp(resp{
 			id:  req.id,
-			msg: h.(RequestHandler)(ctx, req.msg),
+			msg: h(ctx, req.msg),
 		}, nil))
 	}
 }
 
+// returns true for local dispatch
 func (b *Broker) forward(ctx context.Context, req req, pkey key, dispatch func(context.Context, req)) {
 	var (
 		id       uint64
@@ -546,26 +540,5 @@ func (b *Broker) stabilize(interval time.Duration) {
 				b.onError(errorf("stabilization: %v", err))
 			}
 		}
-	}
-}
-
-type handlerGroup struct {
-	mtx      sync.RWMutex
-	handlers []MessageHandler
-}
-
-func (g *handlerGroup) add(h MessageHandler) {
-	g.mtx.Lock()
-	g.handlers = append(g.handlers, h)
-	g.mtx.Unlock()
-}
-
-func (g *handlerGroup) dispatch(ctx context.Context, msg Message) {
-	g.mtx.RLock()
-	handlers := g.handlers
-	g.mtx.RUnlock()
-
-	for _, h := range handlers {
-		h(ctx, msg)
 	}
 }

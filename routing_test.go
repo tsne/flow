@@ -4,18 +4,20 @@ import "testing"
 
 func TestNewRoutingTable(t *testing.T) {
 	opts := options{
-		nodeKey:         intKey(7),
-		successorCount:  7,
-		stabilizerCount: 8,
+		nodeKey: intKey(7),
+		stabilization: Stabilization{
+			Successors:  7,
+			Stabilizers: 8,
+		},
 	}
 	r := newRoutingTable(opts)
 
 	switch {
 	case !r.local.equal(opts.nodeKey):
 		t.Fatalf("unexpected local key: %s", r.local)
-	case r.successorCount != opts.successorCount:
+	case r.successorCount != opts.stabilization.Successors:
 		t.Fatalf("unexpected successor count: %d", r.successorCount)
-	case r.stabilizerCount != opts.stabilizerCount:
+	case r.stabilizerCount != opts.stabilization.Stabilizers:
 		t.Fatalf("unexpected stabilizer count: %d", r.stabilizerCount)
 	}
 }

@@ -7,73 +7,108 @@ import (
 	"time"
 )
 
+const defaultGroupName = "_global"
+
 // Option represents an option which can be used to configure
 // a broker.
 type Option func(*options) error
 
+// Stabilization defines the stabilization parameters. A stabilization
+// spreads the node-local information of the group view and therefore
+// stabilizes the whole group.
+type Stabilization struct {
+	Successors  int           // number of successors to spread local group structure
+	Stabilizers int           // number of pinged nodes
+	Interval    time.Duration // duration for the stabilization interval
+}
+
 type options struct {
-	codec        Codec
-	errorHandler func(error)
-
-	groupName string
-	nodeKey   key
-
-	successorCount  int
-	stabilizerCount int
-
-	stabilizationInterval time.Duration
-	ackTimeout            time.Duration
+	messageHandlers map[string][]MessageHandler
+	requestHandlers map[string]RequestHandler
+	codec           Codec
+	errorHandler    func(error)
+	groupName       string
+	nodeKey         key
+	stabilization   Stabilization
+	ackTimeout      time.Duration
 }
 
 func defaultOptions() options {
 	// TODO: verify defaults
 	return options{
-		codec:        DefaultCodec{},
-		errorHandler: func(err error) { fmt.Fprintln(os.Stderr, err) },
-
-		groupName: "_flowgroup",
-		nodeKey:   nil, // will be set in 'apply'
-
-		successorCount:  5,
-		stabilizerCount: 5,
-
-		stabilizationInterval: 10 * time.Second,
-		ackTimeout:            750 * time.Millisecond,
+		messageHandlers: make(map[string][]MessageHandler),
+		requestHandlers: make(map[string]RequestHandler),
+		codec:           DefaultCodec{},
+		errorHandler:    func(err error) { fmt.Fprintln(os.Stderr, err) },
+		groupName:       defaultGroupName,
+		nodeKey:         nil, // will be set in 'apply'
+		stabilization: Stabilization{
+			Successors:  5,
+			Stabilizers: 5,
+			Interval:    10 * time.Second,
+		},
+		ackTimeout: 750 * time.Millisecond,
 	}
 }
 
-func (o *options) apply(opts ...Option) (err error) {
+func (o *options) apply(opts ...Option) error {
 	for _, opt := range opts {
-		if err = opt(o); err != nil {
+		if err := opt(o); err != nil {
 			return err
 		}
 	}
 
 	if len(o.nodeKey) == 0 {
-		if o.nodeKey, err = defaultNodeKey(); err != nil {
+		o.nodeKey = alloc(KeySize, nil)
+		if err := randomKey(o.nodeKey); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// MessageCodec assigns the desired message codec to the broker. The codec
-// is used to encode and decode messages to and from binary data. If no
-// message codec is assigned, an internal binary format will be used instead.
-func MessageCodec(c Codec) Option {
+// WithMessageHandler defines a handler for incoming messages of the
+// specified stream. These messages are partitioned within the group
+// the broker is assigned to. A broker can have multiple message
+// handler per stream.
+func WithMessageHandler(stream string, h MessageHandler) Option {
 	return func(o *options) error {
-		if c == nil {
-			return optionError("no message codec specified")
+		switch {
+		case stream == "":
+			return optionError("no message stream specified")
+		case h == nil:
+			return optionError("no message handler specified")
 		}
-		o.codec = c
+
+		o.messageHandlers[stream] = append(o.messageHandlers[stream], h)
 		return nil
 	}
 }
 
-// ErrorHandler uses the given handler function to report errors, which
+// WithRequestHandler defines a handler for incoming requests of the
+// specified stream. These requests are partitioned within the group
+// the broker is assigned to. A broker can only have a one request
+// handler per stream.
+func WithRequestHandler(stream string, h RequestHandler) Option {
+	return func(o *options) error {
+		switch {
+		case stream == "":
+			return optionError("no request stream specified")
+		case h == nil:
+			return optionError("no request handler specified")
+		case o.requestHandlers[stream] != nil:
+			return optionError("request handler for stream '" + stream + "' already exists")
+		}
+
+		o.requestHandlers[stream] = h
+		return nil
+	}
+}
+
+// WithErrorHandler uses the given handler function to report errors, which
 // occur concurrently (e.g. when receiving an invalid subscribed message).
 // If no error handler is assigned, these errors will be logged to stderr.
-func ErrorHandler(f func(error)) Option {
+func WithErrorHandler(f func(error)) Option {
 	return func(o *options) error {
 		if f == nil {
 			return optionError("no error handler specified")
@@ -83,68 +118,68 @@ func ErrorHandler(f func(error)) Option {
 	}
 }
 
-// Group assigns the broker to a group with the given name.
-// If no group is assigned to a broker, a global default group
-// will be used instead.
-func Group(name string) Option {
-	return func(o *options) error {
-		if name == "" {
-			return optionError("empty group name")
-		}
-		o.groupName = name
-		return nil
-	}
-}
-
-// NodeKey assigns a key to the broker. This key is used for
-// message partitioning and should therefore be unique within
+// WithPartition assigns a group and a key to the broker.
+// All broker within a group are arranged in a ring structure
+// and eventually know each other. If the group is empty, a global
+// default group will be assigned.
+// The key defines the position in the group's ring structure and
+// is used to partition message delivery. It should be unique within
 // the assigned group.
-func NodeKey(k Key) Option {
+func WithPartition(group string, key Key) Option {
 	return func(o *options) error {
+		if group == "" {
+			group = defaultGroupName
+		}
+
+		o.groupName = group
 		o.nodeKey = alloc(KeySize, o.nodeKey)
-		copy(o.nodeKey, k[:])
+		copy(o.nodeKey, key[:])
 		return nil
 	}
 }
 
-// Successors defines the number of successor nodes which should be used
-// to spread information about the local group structure.
-func Successors(n int) Option {
+// WithCodec assigns the desired message codec to the broker. The codec
+// is used to encode and decode messages to and from binary data. If no
+// message codec is assigned, an internal binary format will be used instead.
+func WithCodec(c Codec) Option {
 	return func(o *options) error {
-		if n <= 0 {
-			return optionError("non-positive successor count")
+		if c == nil {
+			return optionError("no message codec specified")
 		}
-		o.successorCount = n
+		o.codec = c
 		return nil
 	}
 }
 
-// Stabilizers defines the number of nodes which should be pinged
-// in the stabilization process.
-func Stabilizers(n int) Option {
+// WithStabilization defines the stabilization parameters. All parameters are
+// optional and are apply only when they are not zero.
+func WithStabilization(s Stabilization) Option {
 	return func(o *options) error {
-		if n <= 0 {
-			return optionError("non-positive stabilizer count")
+		switch {
+		case s.Successors < 0:
+			return optionError("negative successor count")
+		case s.Stabilizers < 0:
+			return optionError("negative stabilizer count")
+		case s.Interval < 0:
+			return optionError("negative stabilization interval")
 		}
-		o.stabilizerCount = n
+
+		if s.Successors > 0 {
+			o.stabilization.Successors = s.Successors
+		}
+		if s.Stabilizers > 0 {
+			o.stabilization.Stabilizers = s.Stabilizers
+		}
+		if s.Interval > 0 {
+			o.stabilization.Interval = s.Interval
+		}
 		return nil
 	}
 }
 
-// StabilizationInterval defines the duration for the stabilization interval.
-func StabilizationInterval(d time.Duration) Option {
-	return func(o *options) error {
-		if d <= 0 {
-			return optionError("non-positive stabilization interval")
-		}
-		o.stabilizationInterval = d
-		return nil
-	}
-}
-
-// AckTimeout defines the timeout for acknowledging an internally
+// WithAckTimeout defines the timeout for acknowledging an internally
 // forwarded message.
-func AckTimeout(d time.Duration) Option {
+func WithAckTimeout(d time.Duration) Option {
 	return func(o *options) error {
 		if d <= 0 {
 			return optionError("non-positive ack timeout")

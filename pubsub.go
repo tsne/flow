@@ -3,7 +3,6 @@ package flow
 import (
 	"context"
 	"encoding/hex"
-	"sync"
 )
 
 // PubSubHandler represents a handler for the plugged-in pub/sub system.
@@ -42,9 +41,7 @@ type pubsub struct {
 	onError     func(error)
 	groupStream string
 	nodeStream  string
-
-	subsMtx sync.Mutex
-	subs    map[string]Subscription
+	subs        map[string]Subscription
 }
 
 func newPubSub(ps PubSub, opts options) pubsub {
@@ -71,9 +68,6 @@ func (ps *pubsub) publish(ctx context.Context, stream string, data []byte) error
 }
 
 func (ps *pubsub) subscribeGroup(ctx context.Context, h PubSubHandler) error {
-	ps.subsMtx.Lock()
-	defer ps.subsMtx.Unlock()
-
 	_, hasGroupSub := ps.subs[ps.groupStream]
 	_, hasNodeSub := ps.subs[ps.nodeStream]
 	if hasGroupSub || hasNodeSub {
@@ -97,9 +91,6 @@ func (ps *pubsub) subscribeGroup(ctx context.Context, h PubSubHandler) error {
 }
 
 func (ps *pubsub) subscribe(ctx context.Context, stream string, h PubSubHandler) error {
-	ps.subsMtx.Lock()
-	defer ps.subsMtx.Unlock()
-
 	if _, has := ps.subs[stream]; has {
 		return errorf("already subscribed to '%s'", stream)
 	}
@@ -120,9 +111,6 @@ func (ps *pubsub) unsubscribe(ctx context.Context, stream string, sub Subscripti
 }
 
 func (ps *pubsub) unsubscribeAll(ctx context.Context) {
-	ps.subsMtx.Lock()
-	defer ps.subsMtx.Unlock()
-
 	for stream, sub := range ps.subs {
 		ps.unsubscribe(ctx, stream, sub)
 	}

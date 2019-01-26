@@ -14,7 +14,7 @@ func TestBrokerPublish(t *testing.T) {
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
 	b, err := NewBroker(ctx, pubsub,
-		StabilizationInterval(time.Hour), // disable stabilization
+		disableStabilization(),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -47,19 +47,14 @@ func TestBrokerSubscription(t *testing.T) {
 	local := KeyFromBytes(msg.PartitionKey)
 	localStream := nodeStream(groupName, local[:])
 
+	messageChan := make(chan Message, 1)
 	pubsub := newPubsubRecorder()
 	b, err := NewBroker(ctx, pubsub,
-		Group(groupName),
-		NodeKey(local),
-		AckTimeout(time.Hour),            // disable ack timeouts
-		StabilizationInterval(time.Hour), // disable stabilization
+		WithMessageHandler(msg.Stream, func(_ context.Context, msg Message) { messageChan <- msg }),
+		WithPartition(groupName, local),
+		disableAckTimeouts(),
+		disableStabilization(),
 	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	messageChan := make(chan Message, 1)
-	err = b.Subscribe(ctx, msg.Stream, func(_ context.Context, msg Message) { messageChan <- msg })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -226,11 +221,13 @@ func TestBrokerGroupProtocol(t *testing.T) {
 		}, nil))
 	}()
 
+	const stream = "mystream"
+	incoming := make(chan Message, 1)
 	b, err := NewBroker(ctx, pubsub,
-		NodeKey(local.array()),
-		Group(groupName),
-		AckTimeout(time.Hour),            // disable ack timeouts
-		StabilizationInterval(time.Hour), // disable stabilization
+		WithMessageHandler(stream, func(_ context.Context, m Message) { incoming <- m }),
+		WithPartition(groupName, local.array()),
+		disableAckTimeouts(),
+		disableStabilization(),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -321,20 +318,11 @@ func TestBrokerGroupProtocol(t *testing.T) {
 
 		id := b.nextID()
 		msg := Message{
-			Stream:       "mystream",
+			Stream:       stream,
 			Time:         now,
 			PartitionKey: nil,
 			Data:         []byte("message data"),
 		}
-
-		incoming := make(chan Message, 1)
-		err := b.Subscribe(ctx, msg.Stream, func(_ context.Context, m Message) {
-			incoming <- m
-		})
-		if err != nil {
-			t.Fatalf("unexpexted error: %v", err)
-		}
-		defer clearSubscriptions(b, msg.Stream)
 
 		go func() {
 			defer wg.Done()
@@ -375,7 +363,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 
 		id := b.nextID()
 		msg := Message{
-			Stream:       "mystream",
+			Stream:       stream,
 			Time:         now,
 			PartitionKey: nil,
 			Data:         []byte("message data"),
@@ -455,11 +443,6 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			b.ackTimeout = time.Millisecond
 			defer func() { b.ackTimeout = ackTimeout }()
 
-			dispatched := make(chan Message, 1)
-			b.Subscribe(ctx, msg.Stream, func(_ context.Context, msg Message) {
-				dispatched <- msg
-			})
-
 			// ack
 			frame := <-remoteChan
 			if frame.typ() != frameTypeAck {
@@ -490,7 +473,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			}
 
 			// dispatch
-			dispatchedMsg := <-dispatched
+			dispatchedMsg := <-incoming
 			switch {
 			case !equalMessage(dispatchedMsg, msg):
 				t.Fatalf("unexpected dispatched message: %+v", dispatchedMsg)
@@ -538,17 +521,6 @@ func TestBrokerRequest(t *testing.T) {
 	local := intKey(1)
 	localStream := nodeStream(groupName, local)
 
-	pubsub := newPubsubRecorder()
-	b, err := NewBroker(ctx, pubsub,
-		NodeKey(local.array()),
-		Group(groupName),
-		AckTimeout(time.Hour),            // disable ack timeouts
-		StabilizationInterval(time.Hour), // disable stabilization
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	request := Message{
 		Stream:       "myrequests",
 		PartitionKey: []byte("partition one"),
@@ -563,17 +535,28 @@ func TestBrokerRequest(t *testing.T) {
 		Data:         []byte("response data"),
 	}
 
+	var requestHandler RequestHandler // set in the sub-tests
+
+	pubsub := newPubsubRecorder()
+	b, err := NewBroker(ctx, pubsub,
+		WithRequestHandler(request.Stream, func(ctx context.Context, msg Message) Message {
+			return requestHandler(ctx, msg)
+		}),
+		WithPartition(groupName, local.array()),
+		disableAckTimeouts(),
+		disableStabilization(),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
 	t.Run("dispatch", func(t *testing.T) {
-		err = b.SubscribeRequest(ctx, request.Stream, func(_ context.Context, msg Message) Message {
+		requestHandler = func(_ context.Context, msg Message) Message {
 			if !equalMessage(msg, request) {
 				t.Fatalf("unexpected request: %+v", msg)
 			}
 			return response
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
 		}
-		defer clearSubscriptions(b, request.Stream)
 
 		msg, err := b.Request(ctx, request)
 		switch {
@@ -585,14 +568,10 @@ func TestBrokerRequest(t *testing.T) {
 	})
 
 	t.Run("forward", func(t *testing.T) {
-		err := b.SubscribeRequest(ctx, request.Stream, func(_ context.Context, msg Message) Message {
+		requestHandler = func(_ context.Context, msg Message) Message {
 			t.Fatal("unexpected request handler call")
 			return msg
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
 		}
-		defer clearSubscriptions(b, request.Stream)
 
 		remote := intKey(0)
 		reqID := lastID(b) + 1
@@ -651,14 +630,10 @@ func TestBrokerRequest(t *testing.T) {
 		defer func() { b.ackTimeout = ackTimeout }()
 
 		requestChan := make(chan Message, 1)
-		err := b.SubscribeRequest(ctx, request.Stream, func(_ context.Context, msg Message) Message {
+		requestHandler = func(_ context.Context, msg Message) Message {
 			requestChan <- msg
 			return response
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
 		}
-		defer clearSubscriptions(b, request.Stream)
 
 		remote := intKey(0)
 		reqID := lastID(b) + 1
@@ -714,7 +689,10 @@ func TestBrokerRequest(t *testing.T) {
 		ctx, cancel := context.WithTimeout(ctx, time.Millisecond)
 		defer cancel()
 
-		_, err := b.Request(ctx, request)
+		req := request
+		req.Stream = "non-existing-stream"
+
+		_, err := b.Request(ctx, req)
 		if err != ctx.Err() {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -724,7 +702,10 @@ func TestBrokerRequest(t *testing.T) {
 		ctx, cancel := context.WithTimeout(ctx, time.Millisecond)
 		defer cancel()
 
-		_, err := b.Request(ctx, request)
+		req := request
+		req.Stream = "non-existing-stream"
+
+		_, err := b.Request(ctx, req)
 		if err != context.DeadlineExceeded {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -755,22 +736,19 @@ func TestBrokerClose(t *testing.T) {
 	defer remoteSub.Unsubscribe(ctx)
 
 	b, err := NewBroker(ctx, pubsub,
-		NodeKey(local.array()),
-		Group(groupName),
-		AckTimeout(time.Hour),            // disable ack timeouts
-		StabilizationInterval(time.Hour), // disable stabilization
-		ErrorHandler(func(err error) {
-			errch <- err
+		WithMessageHandler(messageStream, func(_ context.Context, msg Message) {
+			t.Fatal("unexpected message handler call")
 		}),
+		WithPartition(groupName, local.array()),
+		disableAckTimeouts(),
+		disableStabilization(),
+		WithErrorHandler(func(err error) { errch <- err }),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	b.routing.register(remote[:])
-	b.Subscribe(ctx, messageStream, func(_ context.Context, msg Message) {
-		t.Fatal("unexpected message handler call")
-	})
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -810,29 +788,27 @@ func TestBrokerShutdown(t *testing.T) {
 	local := intKey(1)
 	pubsub := newPubsubRecorder()
 
-	b, err := NewBroker(ctx, pubsub,
-		NodeKey(local.array()),
-		Group(groupName),
-		AckTimeout(time.Hour),            // disable ack timeouts
-		StabilizationInterval(time.Hour), // disable stabilization
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	receivedMessage := make(chan struct{})
 	receivedRequest := make(chan struct{})
 	finishedMessage := make(chan struct{})
 
-	b.Subscribe(ctx, messageStream, func(_ context.Context, msg Message) {
-		close(receivedMessage)
-		<-finishedMessage
-	})
-	b.SubscribeRequest(ctx, requestStream, func(_ context.Context, msg Message) Message {
-		close(receivedRequest)
-		<-finishedMessage
-		return msg
-	})
+	b, err := NewBroker(ctx, pubsub,
+		WithMessageHandler(messageStream, func(_ context.Context, msg Message) {
+			close(receivedMessage)
+			<-finishedMessage
+		}),
+		WithRequestHandler(requestStream, func(_ context.Context, msg Message) Message {
+			close(receivedRequest)
+			<-finishedMessage
+			return msg
+		}),
+		WithPartition(groupName, local.array()),
+		disableAckTimeouts(),
+		disableStabilization(),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -902,8 +878,8 @@ func TestBrokerStabilization(t *testing.T) {
 		b := &Broker{
 			ackTimeout: ackTimeout,
 			routing: newRoutingTable(options{
-				nodeKey:         local,
-				stabilizerCount: 1,
+				nodeKey:       local,
+				stabilization: Stabilization{Stabilizers: 1},
 			}),
 			pubsub: newPubSub(pubsub, options{
 				groupName: groupName,
@@ -1006,19 +982,6 @@ func TestBrokerStabilization(t *testing.T) {
 	})
 }
 
-func clearSubscriptions(b *Broker, stream string) {
-	b.pubsub.subsMtx.Lock()
-	sub, has := b.pubsub.subs[stream]
-	delete(b.pubsub.subs, stream)
-	b.pubsub.subsMtx.Unlock()
-
-	if has {
-		sub.Unsubscribe(context.Background())
-		b.handlerGroups.Delete(stream)
-		b.requestHandlers.Delete(stream)
-	}
-}
-
 func lastID(b *Broker) uint64 {
 	return atomic.LoadUint64(&b.id)
 }
@@ -1028,4 +991,12 @@ func hasPendingAck(b *Broker, id uint64) bool {
 	_, has := b.pendingAcks[id]
 	b.pendingAckMtx.Unlock()
 	return has
+}
+
+func disableStabilization() Option {
+	return WithStabilization(Stabilization{Interval: time.Hour})
+}
+
+func disableAckTimeouts() Option {
+	return WithAckTimeout(time.Hour)
 }
