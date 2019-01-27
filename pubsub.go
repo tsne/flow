@@ -37,29 +37,29 @@ type PubSub interface {
 }
 
 type pubsub struct {
-	ps          PubSub
-	onError     func(error)
-	groupStream string
-	nodeStream  string
-	subs        map[string]Subscription
+	ps           PubSub
+	onError      func(error)
+	cliqueStream string
+	nodeStream   string
+	subs         map[string]Subscription
 }
 
 func newPubSub(ps PubSub, opts options) pubsub {
 	return pubsub{
-		ps:          ps,
-		onError:     opts.errorHandler,
-		groupStream: opts.groupName,
-		nodeStream:  nodeStream(opts.groupName, opts.nodeKey),
-		subs:        make(map[string]Subscription),
+		ps:           ps,
+		onError:      opts.errorHandler,
+		cliqueStream: opts.cliqueName,
+		nodeStream:   nodeStream(opts.cliqueName, opts.nodeKey),
+		subs:         make(map[string]Subscription),
 	}
 }
 
-func (ps *pubsub) sendToGroup(ctx context.Context, data []byte) error {
-	return ps.ps.Publish(ctx, ps.groupStream, data)
+func (ps *pubsub) sendToClique(ctx context.Context, data []byte) error {
+	return ps.ps.Publish(ctx, ps.cliqueStream, data)
 }
 
 func (ps *pubsub) sendToNode(ctx context.Context, target key, data []byte) error {
-	stream := nodeStream(ps.groupStream, target)
+	stream := nodeStream(ps.cliqueStream, target)
 	return ps.ps.Publish(ctx, stream, data)
 }
 
@@ -67,25 +67,25 @@ func (ps *pubsub) publish(ctx context.Context, stream string, data []byte) error
 	return ps.ps.Publish(ctx, stream, data)
 }
 
-func (ps *pubsub) subscribeGroup(ctx context.Context, h PubSubHandler) error {
-	_, hasGroupSub := ps.subs[ps.groupStream]
+func (ps *pubsub) subscribeClique(ctx context.Context, h PubSubHandler) error {
+	_, hasCliqueSub := ps.subs[ps.cliqueStream]
 	_, hasNodeSub := ps.subs[ps.nodeStream]
-	if hasGroupSub || hasNodeSub {
-		return errorf("already subscribed to group '%s'", ps.groupStream)
+	if hasCliqueSub || hasNodeSub {
+		return errorf("already subscribed to clique '%s'", ps.cliqueStream)
 	}
 
-	groupSub, err := ps.ps.Subscribe(ctx, ps.groupStream, "", h)
+	cliqueSub, err := ps.ps.Subscribe(ctx, ps.cliqueStream, "", h)
 	if err != nil {
 		return err
 	}
 
 	nodeSub, err := ps.ps.Subscribe(ctx, ps.nodeStream, "", h)
 	if err != nil {
-		ps.unsubscribe(ctx, ps.groupStream, groupSub)
+		ps.unsubscribe(ctx, ps.cliqueStream, cliqueSub)
 		return err
 	}
 
-	ps.subs[ps.groupStream] = groupSub
+	ps.subs[ps.cliqueStream] = cliqueSub
 	ps.subs[ps.nodeStream] = nodeSub
 	return nil
 }
@@ -95,7 +95,7 @@ func (ps *pubsub) subscribe(ctx context.Context, stream string, h PubSubHandler)
 		return errorf("already subscribed to '%s'", stream)
 	}
 
-	sub, err := ps.ps.Subscribe(ctx, stream, ps.groupStream, h)
+	sub, err := ps.ps.Subscribe(ctx, stream, ps.cliqueStream, h)
 	if err != nil {
 		return err
 	}
@@ -116,9 +116,9 @@ func (ps *pubsub) unsubscribeAll(ctx context.Context) {
 	}
 }
 
-func nodeStream(groupName string, nodeKey key) string {
-	buf := alloc(len(groupName)+1+2*KeySize, nil)
-	n := copy(buf, groupName)
+func nodeStream(cliqueName string, nodeKey key) string {
+	buf := alloc(len(cliqueName)+1+2*KeySize, nil)
+	n := copy(buf, cliqueName)
 	buf[n] = '.'
 	hex.Encode(buf[n+1:], nodeKey)
 	return string(buf)

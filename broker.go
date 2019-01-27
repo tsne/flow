@@ -24,7 +24,7 @@ type pendingAck struct {
 	errch    chan error
 }
 
-// Broker represents a single node within a group. It enables
+// Broker represents a single node within a clique. It enables
 // the publishing and subscribing capabilities of the pub/sub
 // system. Each subscribed message is handled by the responsible
 // broker, which is determined by the respective node key.
@@ -79,7 +79,7 @@ func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error)
 		requestHandlers: opts.requestHandlers,
 	}
 
-	err := b.pubsub.subscribeGroup(ctx, b.processGroupProtocol)
+	err := b.pubsub.subscribeClique(ctx, b.processCliqueProtocol)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error)
 	}
 
 	join := marshalJoin(join{sender: b.routing.local}, nil)
-	if err := b.pubsub.sendToGroup(ctx, join); err != nil {
+	if err := b.pubsub.sendToClique(ctx, join); err != nil {
 		b.pubsub.unsubscribeAll(ctx)
 		return nil, err
 	}
@@ -109,13 +109,13 @@ func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error)
 	return b, nil
 }
 
-// Close notifies all group members about a leaving broker and
+// Close notifies all clique members about a leaving broker and
 // disconnects from the pub/sub system.
 func (b *Broker) Close() error {
 	return b.shutdown(context.Background(), func() error { return nil })
 }
 
-// Shutdown gracefully shuts down the broker. It notifies all group
+// Shutdown gracefully shuts down the broker. It notifies all clique
 // members about a leaving broker and waits until all messages and
 // requests are processed. If the given context expires before, the
 // context's error will be returned.
@@ -137,7 +137,7 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 
 // Publish forwards the message directly to the pub/sub system.
 // If the message does not contain any partition key, the message will
-// be processed by a random broker within a group.
+// be processed by a random broker within a clique.
 // All binary data of the passed message needs to be valid only during
 // the method call.
 func (b *Broker) Publish(ctx context.Context, msg Message) error {
@@ -152,7 +152,7 @@ func (b *Broker) Publish(ctx context.Context, msg Message) error {
 
 // Request sends a request message and waits for its response.
 // If the message has no partition key, the request will be processed
-// by a random broker within a group.
+// by a random broker within a clique.
 // All binary data of the passed message needs to be valid only during
 // the method call.
 func (b *Broker) Request(ctx context.Context, msg Message) (Message, error) {
@@ -209,10 +209,10 @@ func (b *Broker) processRequest(ctx context.Context, stream string, data []byte)
 	b.handleReq(ctx, frame)
 }
 
-func (b *Broker) processGroupProtocol(ctx context.Context, stream string, data []byte) {
+func (b *Broker) processCliqueProtocol(ctx context.Context, stream string, data []byte) {
 	frame, err := frameFromBytes(data)
 	if err != nil {
-		b.onError(errorf("group subscription: %v", err))
+		b.onError(errorf("clique subscription: %v", err))
 		return
 	}
 
@@ -232,7 +232,7 @@ func (b *Broker) processGroupProtocol(ctx context.Context, stream string, data [
 	case frameTypeResp:
 		b.handleResp(frame)
 	default:
-		b.onError(errorf("unexpected group frame type: %s", frame.typ()))
+		b.onError(errorf("unexpected clique frame type: %s", frame.typ()))
 	}
 }
 
@@ -484,7 +484,7 @@ func (b *Broker) shutdown(ctx context.Context, wait func() error) error {
 	close(b.leaving)
 
 	leave := marshalLeave(leave{node: b.routing.local}, nil)
-	err := b.pubsub.sendToGroup(ctx, leave)
+	err := b.pubsub.sendToClique(ctx, leave)
 
 	if waitErr := wait(); waitErr != nil {
 		err = waitErr

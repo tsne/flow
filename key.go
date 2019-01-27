@@ -10,7 +10,7 @@ import (
 // KeySize defines the size of a key.
 const KeySize = sha1.Size
 
-// Key represents a key within a broker group and is used
+// Key represents a key within a broker clique and is used
 // for partitioning.
 type Key [KeySize]byte
 

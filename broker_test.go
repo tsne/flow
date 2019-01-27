@@ -33,7 +33,7 @@ func TestBrokerPublish(t *testing.T) {
 }
 
 func TestBrokerSubscription(t *testing.T) {
-	const groupName = "testgroup"
+	const cliqueName = "test-clique"
 
 	ctx := context.Background()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
@@ -45,13 +45,13 @@ func TestBrokerSubscription(t *testing.T) {
 	}
 
 	local := KeyFromBytes(msg.PartitionKey)
-	localStream := nodeStream(groupName, local[:])
+	localStream := nodeStream(cliqueName, local[:])
 
 	messageChan := make(chan Message, 1)
 	pubsub := newPubsubRecorder()
 	b, err := NewBroker(ctx, pubsub,
 		WithMessageHandler(msg.Stream, func(_ context.Context, msg Message) { messageChan <- msg }),
-		WithPartition(groupName, local),
+		WithPartition(cliqueName, local),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -81,7 +81,7 @@ func TestBrokerSubscription(t *testing.T) {
 		b.routing.register(keys(remote[:]))
 		defer b.routing.unregister(remote[:])
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote[:]))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote[:]))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -134,7 +134,7 @@ func TestBrokerSubscription(t *testing.T) {
 		b.routing.register(keys(remote[:]))
 		defer b.routing.unregister(remote[:])
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote[:]))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote[:]))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -177,21 +177,21 @@ func TestBrokerSubscription(t *testing.T) {
 	})
 }
 
-func TestBrokerGroupProtocol(t *testing.T) {
-	const groupName = "testgroup"
+func TestBrokerCliqueProtocol(t *testing.T) {
+	const cliqueName = "test-clique"
 
 	ctx := context.Background()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
 	local := intKey(1)
-	localStream := nodeStream(groupName, local)
+	localStream := nodeStream(cliqueName, local)
 
 	remote := intKey(2)
-	remoteStream := nodeStream(groupName, remote)
+	remoteStream := nodeStream(cliqueName, remote)
 
 	pubsub := newPubsubRecorder()
-	groupChan, groupSub := pubsub.SubscribeChan(ctx, groupName)
-	defer groupSub.Unsubscribe(ctx)
+	cliqueChan, cliqueSub := pubsub.SubscribeChan(ctx, cliqueName)
+	defer cliqueSub.Unsubscribe(ctx)
 
 	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, remoteStream)
 	defer remoteSub.Unsubscribe(ctx)
@@ -202,7 +202,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 	go func() {
 		defer wg.Done()
 
-		frame := <-groupChan
+		frame := <-cliqueChan
 		if frame.typ() != frameTypeJoin {
 			t.Fatalf("unexpected frame type: %s", frame.typ())
 		}
@@ -225,7 +225,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 	incoming := make(chan Message, 1)
 	b, err := NewBroker(ctx, pubsub,
 		WithMessageHandler(stream, func(_ context.Context, m Message) { incoming <- m }),
-		WithPartition(groupName, local.array()),
+		WithPartition(cliqueName, local.array()),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -255,7 +255,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			_ = <-groupChan // consume JOIN
+			_ = <-cliqueChan // consume JOIN
 			frame := <-remoteChan
 			if frame.typ() != frameTypeInfo {
 				t.Fatalf("unexpected frame type: %s", frame.typ())
@@ -270,7 +270,7 @@ func TestBrokerGroupProtocol(t *testing.T) {
 			}
 		}()
 
-		pubsub.Publish(ctx, groupName, marshalJoin(join{sender: remote}, nil))
+		pubsub.Publish(ctx, cliqueName, marshalJoin(join{sender: remote}, nil))
 
 		if !containsKey(keys(b.routing.keys), remote) {
 			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
@@ -501,10 +501,10 @@ func TestBrokerGroupProtocol(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			_ = <-groupChan // consume LEAV
+			_ = <-cliqueChan // consume LEAV
 		}()
 
-		pubsub.Publish(ctx, groupName, marshalLeave(leave{node: remote}, nil))
+		pubsub.Publish(ctx, cliqueName, marshalLeave(leave{node: remote}, nil))
 
 		if containsKey(keys(b.routing.keys), remote) {
 			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
@@ -513,13 +513,13 @@ func TestBrokerGroupProtocol(t *testing.T) {
 }
 
 func TestBrokerRequest(t *testing.T) {
-	const groupName = "testgroup"
+	const cliqueName = "test-clique"
 
 	ctx := context.Background()
 	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
 	local := intKey(1)
-	localStream := nodeStream(groupName, local)
+	localStream := nodeStream(cliqueName, local)
 
 	request := Message{
 		Stream:       "myrequests",
@@ -542,7 +542,7 @@ func TestBrokerRequest(t *testing.T) {
 		WithRequestHandler(request.Stream, func(ctx context.Context, msg Message) Message {
 			return requestHandler(ctx, msg)
 		}),
-		WithPartition(groupName, local.array()),
+		WithPartition(cliqueName, local.array()),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -579,7 +579,7 @@ func TestBrokerRequest(t *testing.T) {
 		b.routing.register(keys(remote))
 		defer b.routing.unregister(remote)
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -640,7 +640,7 @@ func TestBrokerRequest(t *testing.T) {
 
 		b.routing.register(keys(remote))
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -714,7 +714,7 @@ func TestBrokerRequest(t *testing.T) {
 
 func TestBrokerClose(t *testing.T) {
 	const (
-		groupName     = "testgroup"
+		cliqueName    = "test-clique"
 		messageStream = "my-message-stream"
 	)
 
@@ -732,14 +732,14 @@ func TestBrokerClose(t *testing.T) {
 
 	local := intKey(1)
 	remote := KeyFromBytes(msg.PartitionKey)
-	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote[:]))
+	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote[:]))
 	defer remoteSub.Unsubscribe(ctx)
 
 	b, err := NewBroker(ctx, pubsub,
 		WithMessageHandler(messageStream, func(_ context.Context, msg Message) {
 			t.Fatal("unexpected message handler call")
 		}),
-		WithPartition(groupName, local.array()),
+		WithPartition(cliqueName, local.array()),
 		disableAckTimeouts(),
 		disableStabilization(),
 		WithErrorHandler(func(err error) { errch <- err }),
@@ -778,7 +778,7 @@ func TestBrokerClose(t *testing.T) {
 
 func TestBrokerShutdown(t *testing.T) {
 	const (
-		groupName     = "testgroup"
+		cliqueName    = "test-clique"
 		messageStream = "my-message-stream"
 		requestStream = "my-request-stream"
 	)
@@ -802,7 +802,7 @@ func TestBrokerShutdown(t *testing.T) {
 			<-finishedMessage
 			return msg
 		}),
-		WithPartition(groupName, local.array()),
+		WithPartition(cliqueName, local.array()),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -861,17 +861,17 @@ func TestBrokerShutdown(t *testing.T) {
 }
 
 func TestBrokerStabilization(t *testing.T) {
-	const groupName = "testgroup"
+	const cliqueName = "test-clique"
 
 	ctx := context.Background()
 
 	local := intKey(1)
-	localStream := nodeStream(groupName, local)
+	localStream := nodeStream(cliqueName, local)
 
 	remote := intKey(11)
 
 	pubsub := newPubsubRecorder()
-	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(groupName, remote))
+	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote))
 	defer remoteSub.Unsubscribe(ctx)
 
 	newBroker := func(ackTimeout time.Duration) (*Broker, error) {
@@ -882,8 +882,8 @@ func TestBrokerStabilization(t *testing.T) {
 				stabilization: Stabilization{Stabilizers: 1},
 			}),
 			pubsub: newPubSub(pubsub, options{
-				groupName: groupName,
-				nodeKey:   local,
+				cliqueName: cliqueName,
+				nodeKey:    local,
 			}),
 			leaving:     make(chan struct{}),
 			pendingAcks: make(map[uint64]pendingAck),
@@ -891,7 +891,7 @@ func TestBrokerStabilization(t *testing.T) {
 
 		b.routing.register(keys(remote))
 
-		err := b.pubsub.subscribeGroup(ctx, b.processGroupProtocol)
+		err := b.pubsub.subscribeClique(ctx, b.processCliqueProtocol)
 		return b, err
 	}
 

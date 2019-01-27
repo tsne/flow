@@ -18,8 +18,8 @@ func TestDefaultOptions(t *testing.T) {
 		t.Fatalf("unexpected codec: %T", opts.codec)
 	case opts.errorHandler == nil:
 		t.Fatal("expected error handler, got none")
-	case opts.groupName == "":
-		t.Fatal("unexpected empty group name")
+	case opts.cliqueName == "":
+		t.Fatal("unexpected empty clique name")
 	case opts.stabilization.Successors <= 0:
 		t.Fatalf("unexpected stabilization successor count: %d", opts.stabilization.Successors)
 	case opts.stabilization.Stabilizers <= 0:
@@ -45,8 +45,8 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 		t.Fatalf("unexpected request handlers: %v", opts.requestHandlers)
 	case opts.codec != defaultOpts.codec:
 		t.Fatalf("unexpected codec: %T", opts.codec)
-	case opts.groupName != defaultOpts.groupName:
-		t.Fatalf("unexpected group name: %s", opts.groupName)
+	case opts.cliqueName != defaultOpts.cliqueName:
+		t.Fatalf("unexpected clique name: %s", opts.cliqueName)
 	case len(opts.nodeKey) == 0:
 		t.Fatal("expected node id to be not empty")
 	case opts.stabilization.Successors != defaultOpts.stabilization.Successors:
@@ -143,19 +143,19 @@ func TestOptionWithPartition(t *testing.T) {
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
-	case opts.groupName != defaultGroupName:
-		t.Fatalf("unexpected group name: %s", err)
+	case opts.cliqueName != defaultCliqueName:
+		t.Fatalf("unexpected clique name: %s", err)
 	case !bytes.Equal(opts.nodeKey, key[:]):
 		t.Fatalf("unexpected node key: %s", printableKey(opts.nodeKey))
 	}
 
 	key = KeyFromString("key two")
-	err = opts.apply(WithPartition("not-the-default-group", key))
+	err = opts.apply(WithPartition("not-the-default-clique", key))
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
-	case opts.groupName != "not-the-default-group":
-		t.Fatalf("unexpected group name: %s", opts.groupName)
+	case opts.cliqueName != "not-the-default-clique":
+		t.Fatalf("unexpected clique name: %s", opts.cliqueName)
 	case !bytes.Equal(opts.nodeKey, key[:]):
 		t.Fatalf("unexpected node key: %s", printableKey(opts.nodeKey))
 	}

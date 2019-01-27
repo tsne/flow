@@ -7,17 +7,17 @@ import (
 	"time"
 )
 
-const defaultGroupName = "_global"
+const defaultCliqueName = "_global"
 
 // Option represents an option which can be used to configure
 // a broker.
 type Option func(*options) error
 
 // Stabilization defines the stabilization parameters. A stabilization
-// spreads the node-local information of the group view and therefore
-// stabilizes the whole group.
+// spreads the node-local information of the clique view and therefore
+// stabilizes the whole clique.
 type Stabilization struct {
-	Successors  int           // number of successors to spread local group structure
+	Successors  int           // number of successors to spread local clique structure
 	Stabilizers int           // number of pinged nodes
 	Interval    time.Duration // duration for the stabilization interval
 }
@@ -27,7 +27,7 @@ type options struct {
 	requestHandlers map[string]RequestHandler
 	codec           Codec
 	errorHandler    func(error)
-	groupName       string
+	cliqueName      string
 	nodeKey         key
 	stabilization   Stabilization
 	ackTimeout      time.Duration
@@ -40,7 +40,7 @@ func defaultOptions() options {
 		requestHandlers: make(map[string]RequestHandler),
 		codec:           DefaultCodec{},
 		errorHandler:    func(err error) { fmt.Fprintln(os.Stderr, err) },
-		groupName:       defaultGroupName,
+		cliqueName:      defaultCliqueName,
 		nodeKey:         nil, // will be set in 'apply'
 		stabilization: Stabilization{
 			Successors:  5,
@@ -68,9 +68,9 @@ func (o *options) apply(opts ...Option) error {
 }
 
 // WithMessageHandler defines a handler for incoming messages of the
-// specified stream. These messages are partitioned within the group
+// specified stream. These messages are partitioned within the clique
 // the broker is assigned to. A broker can have multiple message
-// handler per stream.
+// handlers per stream.
 func WithMessageHandler(stream string, h MessageHandler) Option {
 	return func(o *options) error {
 		switch {
@@ -86,7 +86,7 @@ func WithMessageHandler(stream string, h MessageHandler) Option {
 }
 
 // WithRequestHandler defines a handler for incoming requests of the
-// specified stream. These requests are partitioned within the group
+// specified stream. These requests are partitioned within the clique
 // the broker is assigned to. A broker can only have a one request
 // handler per stream.
 func WithRequestHandler(stream string, h RequestHandler) Option {
@@ -118,20 +118,20 @@ func WithErrorHandler(f func(error)) Option {
 	}
 }
 
-// WithPartition assigns a group and a key to the broker.
-// All broker within a group are arranged in a ring structure
-// and eventually know each other. If the group is empty, a global
-// default group will be assigned.
-// The key defines the position in the group's ring structure and
+// WithPartition assigns a clique and a key to the broker.
+// All broker within a clique are arranged in a ring structure
+// and eventually know each other. If the clique name is empty,
+// a global default clique will be assigned.
+// The key defines the position in the clique's ring structure and
 // is used to partition message delivery. It should be unique within
-// the assigned group.
-func WithPartition(group string, key Key) Option {
+// the assigned clique.
+func WithPartition(clique string, key Key) Option {
 	return func(o *options) error {
-		if group == "" {
-			group = defaultGroupName
+		if clique == "" {
+			clique = defaultCliqueName
 		}
 
-		o.groupName = group
+		o.cliqueName = clique
 		o.nodeKey = alloc(KeySize, o.nodeKey)
 		copy(o.nodeKey, key[:])
 		return nil
