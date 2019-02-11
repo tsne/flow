@@ -2,7 +2,6 @@ package flow
 
 import (
 	"encoding/binary"
-	"time"
 )
 
 // frame format:
@@ -16,25 +15,22 @@ import (
 
 const (
 	protocolVersion = 1
-	headerLen       = 12 // version + frame type + payload length
+	frameHeaderLen  = 12 // version + frame type + payload length
 )
 
 type frameType uint
 
 const (
-	// broadcast
+	// clique
 	frameTypeJoin  = frameType(uint('J')<<24 | uint('O')<<16 | uint('I')<<8 | uint('N'))
 	frameTypeLeave = frameType(uint('L')<<24 | uint('E')<<16 | uint('A')<<8 | uint('V'))
+	frameTypeInfo  = frameType(uint('I')<<24 | uint('N')<<16 | uint('F')<<8 | uint('O'))
+	frameTypePing  = frameType(uint('P')<<24 | uint('I')<<16 | uint('N')<<8 | uint('G'))
 
-	// single node
-	frameTypeInfo = frameType(uint('I')<<24 | uint('N')<<16 | uint('F')<<8 | uint('O'))
-	frameTypePing = frameType(uint('P')<<24 | uint('I')<<16 | uint('N')<<8 | uint('G'))
-	frameTypeFwd  = frameType(uint('F')<<24 | uint('W')<<16 | uint('D')<<8 | uint(' '))
-	frameTypeAck  = frameType(uint('A')<<24 | uint('C')<<16 | uint('K')<<8 | uint(' '))
-
-	// request/response
-	frameTypeReq  = frameType(uint('R')<<24 | uint('E')<<16 | uint('Q')<<8 | uint(' '))
-	frameTypeResp = frameType(uint('R')<<24 | uint('E')<<16 | uint('S')<<8 | uint('P'))
+	// messages
+	frameTypeFwd = frameType(uint('F')<<24 | uint('W')<<16 | uint('D')<<8 | uint(' '))
+	frameTypeAck = frameType(uint('A')<<24 | uint('C')<<16 | uint('K')<<8 | uint(' '))
+	frameTypeMsg = frameType(uint('M')<<24 | uint('S')<<16 | uint('G')<<8 | uint(' '))
 )
 
 func (t frameType) String() string {
@@ -50,14 +46,14 @@ func (t frameType) String() string {
 type frame []byte
 
 func frameFromBytes(p []byte) (frame, error) {
-	if len(p) < headerLen {
+	if len(p) < frameHeaderLen || len(p) < frameHeaderLen+frame(p).payloadSize() {
 		return nil, errMalformedFrame
 	}
 	return frame(p), nil
 }
 
 func newFrame(typ frameType, payloadSize int, buf frame) frame {
-	buf = alloc(headerLen+payloadSize, buf)
+	buf = alloc(frameHeaderLen+payloadSize, buf)
 	binary.BigEndian.PutUint32(buf[0:4], protocolVersion)
 	binary.BigEndian.PutUint32(buf[4:8], uint32(typ))
 	binary.BigEndian.PutUint32(buf[8:12], uint32(payloadSize))
@@ -68,9 +64,12 @@ func (f frame) typ() frameType {
 	return frameType(binary.BigEndian.Uint32(f[4:8]))
 }
 
+func (f frame) payloadSize() int {
+	return int(binary.BigEndian.Uint32(f[8:]))
+}
+
 func (f frame) payload() []byte {
-	plen := binary.BigEndian.Uint32(f[8:12])
-	return f[headerLen : headerLen+plen]
+	return f[frameHeaderLen : frameHeaderLen+f.payloadSize()]
 }
 
 // join
@@ -78,10 +77,10 @@ type join struct {
 	sender key
 }
 
-func marshalJoin(join join, buf frame) frame {
-	buf = newFrame(frameTypeJoin, len(join.sender), buf)
-	copy(buf.payload(), join.sender)
-	return buf
+func marshalJoin(join join) frame {
+	f := newFrame(frameTypeJoin, len(join.sender), nil)
+	copy(f.payload(), join.sender)
+	return f
 }
 
 func unmarshalJoin(f frame) (join join, err error) {
@@ -96,10 +95,10 @@ type leave struct {
 	node key
 }
 
-func marshalLeave(leave leave, buf frame) frame {
-	buf = newFrame(frameTypeLeave, len(leave.node), buf)
-	copy(buf.payload(), leave.node)
-	return buf
+func marshalLeave(leave leave) frame {
+	f := newFrame(frameTypeLeave, len(leave.node), nil)
+	copy(f.payload(), leave.node)
+	return f
 }
 
 func unmarshalLeave(f frame) (leave leave, err error) {
@@ -115,12 +114,13 @@ type info struct {
 	neighbors keys
 }
 
-func marshalInfo(info info, buf frame) frame {
-	buf = newFrame(frameTypeInfo, 8+len(info.neighbors), buf)
-	p := buf.payload()
+func marshalInfo(info info) frame {
+	f := newFrame(frameTypeInfo, 8+len(info.neighbors), nil)
+	p := f.payload()
+
 	binary.BigEndian.PutUint64(p, info.id)
 	copy(p[8:], info.neighbors)
-	return buf
+	return f
 }
 
 func unmarshalInfo(f frame) (info info, err error) {
@@ -143,11 +143,12 @@ type ping struct {
 }
 
 func marshalPing(ping ping, buf frame) frame {
-	buf = newFrame(frameTypePing, 8+len(ping.sender), buf)
-	p := buf.payload()
+	f := newFrame(frameTypePing, 8+len(ping.sender), buf)
+	p := f.payload()
+
 	binary.BigEndian.PutUint64(p, ping.id)
 	copy(p[8:], ping.sender)
-	return buf
+	return f
 }
 
 func unmarshalPing(f frame) (ping ping, err error) {
@@ -163,35 +164,99 @@ func unmarshalPing(f frame) (ping ping, err error) {
 	return ping, nil
 }
 
-// fwd
-type fwd struct {
-	id   uint64
-	ack  key
-	pkey key
-	msg  Message
+// msg
+type msg struct {
+	id     uint64
+	reply  key // optional
+	stream []byte
+	pkey   []byte
+	data   []byte
 }
 
-func marshalFwd(fwd fwd, buf frame) frame {
-	buf = newFrame(frameTypeFwd, 8+2*KeySize+messageSize(fwd.msg), buf)
-	p := buf.payload()
+func msgSize(msg msg) int {
+	return 20 + len(msg.reply) + len(msg.stream) + len(msg.pkey) + len(msg.data)
+}
+
+func marshalMsgPayload(msg msg, p []byte) {
+	replyLen := uint32(len(msg.reply))
+	streamLen := uint32(len(msg.stream))
+	pkeyLen := uint32(len(msg.pkey))
+
+	binary.BigEndian.PutUint64(p, msg.id)
+	binary.BigEndian.PutUint32(p[8:], replyLen)
+	copy(p[12:], msg.reply)
+	binary.BigEndian.PutUint32(p[12+replyLen:], streamLen)
+	copy(p[16+replyLen:], msg.stream)
+	binary.BigEndian.PutUint32(p[16+replyLen+streamLen:], pkeyLen)
+	copy(p[20+replyLen+streamLen:], msg.pkey)
+	copy(p[20+replyLen+streamLen+pkeyLen:], msg.data)
+}
+
+func unmarshalMsgPayload(p []byte) (msg msg, err error) {
+	const minSize = 20
+
+	if len(p) < minSize {
+		return msg, errMalformedMsg
+	}
+
+	replyLen := binary.BigEndian.Uint32(p[8:])
+	if len(p) < minSize+int(replyLen) {
+		return msg, errMalformedMsg
+	}
+
+	streamLen := binary.BigEndian.Uint32(p[12+replyLen:])
+	if len(p) < minSize+int(replyLen+streamLen) {
+		return msg, errMalformedMsg
+	}
+	pkeyLen := binary.BigEndian.Uint32(p[16+replyLen+streamLen:])
+	if len(p) < minSize+int(replyLen+streamLen+pkeyLen) {
+		return msg, errMalformedMsg
+	}
+
+	msg.id = binary.BigEndian.Uint64(p)
+	msg.reply = p[12 : 12+replyLen]
+	msg.stream = p[16+replyLen : 16+replyLen+streamLen]
+	msg.pkey = p[20+replyLen+streamLen : 20+replyLen+streamLen+pkeyLen]
+	msg.data = p[20+replyLen+streamLen+pkeyLen:]
+	return msg, nil
+}
+
+func marshalMsg(msg msg) frame {
+	f := newFrame(frameTypeMsg, msgSize(msg), nil)
+	marshalMsgPayload(msg, f.payload())
+	return f
+}
+
+func unmarshalMsg(f frame) (msg msg, err error) {
+	return unmarshalMsgPayload(f.payload())
+}
+
+// fwd
+type fwd struct {
+	id  uint64
+	ack key
+	msg msg
+}
+
+func marshalFwd(fwd fwd) frame {
+	f := newFrame(frameTypeFwd, 8+KeySize+msgSize(fwd.msg), nil)
+	p := f.payload()
 
 	binary.BigEndian.PutUint64(p, fwd.id)
 	copy(p[8:], fwd.ack)
-	copy(p[8+KeySize:], fwd.pkey)
-	marshalMessageInto(p[8+2*KeySize:], fwd.msg)
-	return buf
+	marshalMsgPayload(fwd.msg, p[8+KeySize:])
+	return f
 }
 
 func unmarshalFwd(f frame) (fwd fwd, err error) {
 	p := f.payload()
-	if len(p) < 8+2*KeySize {
+	if len(p) < 8+KeySize {
 		return fwd, errMalformedFwd
 	}
 
 	fwd.id = binary.BigEndian.Uint64(p)
 	fwd.ack = p[8 : 8+KeySize]
-	fwd.pkey = p[8+KeySize : 8+2*KeySize]
-	if fwd.msg, err = unmarshalMessageFrom(p[8+2*KeySize:]); err != nil {
+	if fwd.msg, err = unmarshalMsgPayload(p[8+KeySize:]); err != nil {
 		return fwd, errMalformedFwd
 	}
 	return fwd, nil
@@ -199,13 +264,17 @@ func unmarshalFwd(f frame) (fwd fwd, err error) {
 
 // ack
 type ack struct {
-	id uint64
+	id   uint64
+	data []byte
 }
 
-func marshalAck(ack ack, buf frame) frame {
-	buf = newFrame(frameTypeAck, 8, buf)
-	binary.BigEndian.PutUint64(buf.payload(), ack.id)
-	return buf
+func marshalAck(ack ack) frame {
+	f := newFrame(frameTypeAck, 8+len(ack.data), nil)
+	p := f.payload()
+
+	binary.BigEndian.PutUint64(p, ack.id)
+	copy(p[8:], ack.data)
+	return f
 }
 
 func unmarshalAck(f frame) (ack ack, err error) {
@@ -215,104 +284,6 @@ func unmarshalAck(f frame) (ack ack, err error) {
 	}
 
 	ack.id = binary.BigEndian.Uint64(p)
+	ack.data = p[8:]
 	return ack, nil
-}
-
-// req
-type req struct {
-	id    uint64
-	reply key
-	msg   Message
-}
-
-func marshalReq(req req, buf frame) frame {
-	buf = newFrame(frameTypeReq, 8+KeySize+messageSize(req.msg), buf)
-	p := buf.payload()
-
-	binary.BigEndian.PutUint64(p, req.id)
-	copy(p[8:], req.reply)
-	marshalMessageInto(p[8+KeySize:], req.msg)
-	return buf
-}
-
-func unmarshalReq(f frame) (req req, err error) {
-	p := f.payload()
-	if len(p) < 8+KeySize {
-		return req, errMalformedReq
-	}
-
-	req.id = binary.BigEndian.Uint64(p)
-	req.reply = p[8 : 8+KeySize]
-	if req.msg, err = unmarshalMessageFrom(p[8+KeySize:]); err != nil {
-		return req, errMalformedReq
-	}
-	return req, nil
-}
-
-// resp
-type resp struct {
-	id  uint64
-	msg Message
-}
-
-func marshalResp(resp resp, buf frame) frame {
-	buf = newFrame(frameTypeResp, 8+messageSize(resp.msg), buf)
-	p := buf.payload()
-
-	binary.BigEndian.PutUint64(p, resp.id)
-	marshalMessageInto(p[8:], resp.msg)
-	return buf
-}
-
-func unmarshalResp(f frame) (resp resp, err error) {
-	p := f.payload()
-	if len(p) < 8 {
-		return resp, errMalformedResp
-	}
-
-	resp.id = binary.BigEndian.Uint64(p)
-	if resp.msg, err = unmarshalMessageFrom(p[8:]); err != nil {
-		return resp, errMalformedResp
-	}
-	return resp, nil
-}
-
-// utility functions
-
-func messageSize(msg Message) int {
-	return 24 + len(msg.Stream) + len(msg.PartitionKey) + len(msg.Data)
-}
-
-func marshalMessageInto(p []byte, msg Message) {
-	streamLen := uint32(len(msg.Stream))
-	partitionKeyLen := uint32(len(msg.PartitionKey))
-	dataLen := uint32(len(msg.Data))
-
-	binary.BigEndian.PutUint32(p, streamLen)
-	copy(p[4:], msg.Stream)
-	binary.BigEndian.PutUint64(p[4+streamLen:], uint64(msg.Time.Unix()))
-	binary.BigEndian.PutUint32(p[12+streamLen:], uint32(msg.Time.Nanosecond()))
-	binary.BigEndian.PutUint32(p[16+streamLen:], partitionKeyLen)
-	copy(p[20+streamLen:], msg.PartitionKey)
-	binary.BigEndian.PutUint32(p[20+streamLen+partitionKeyLen:], dataLen)
-	copy(p[24+streamLen+partitionKeyLen:], msg.Data)
-}
-
-func unmarshalMessageFrom(p []byte) (msg Message, err error) {
-	if len(p) < 24 {
-		return msg, errMalformedMessage
-	}
-
-	streamLen := binary.BigEndian.Uint32(p)
-	partitionKeyLen := binary.BigEndian.Uint32(p[16+streamLen:])
-	dataLen := binary.BigEndian.Uint32(p[20+streamLen+partitionKeyLen:])
-
-	secs := int64(binary.BigEndian.Uint64(p[4+streamLen:]))
-	nsecs := int64(binary.BigEndian.Uint32(p[12+streamLen:]))
-
-	msg.Stream = string(p[4 : 4+streamLen])
-	msg.Time = time.Unix(secs, nsecs).UTC()
-	msg.PartitionKey = p[20+streamLen : 20+streamLen+partitionKeyLen]
-	msg.Data = p[24+streamLen+partitionKeyLen : 24+streamLen+partitionKeyLen+dataLen]
-	return msg, nil
 }

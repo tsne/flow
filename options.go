@@ -1,13 +1,12 @@
 package flow
 
 import (
-	"crypto/rand"
 	"fmt"
 	"os"
 	"time"
 )
 
-const defaultCliqueName = "_global"
+const defaultClique = "_global"
 
 // Option represents an option which can be used to configure
 // a broker.
@@ -23,11 +22,11 @@ type Stabilization struct {
 }
 
 type options struct {
-	messageHandlers map[string][]MessageHandler
+	messageHandlers map[string]MessageHandler
 	requestHandlers map[string]RequestHandler
 	codec           Codec
 	errorHandler    func(error)
-	cliqueName      string
+	clique          string
 	nodeKey         key
 	stabilization   Stabilization
 	ackTimeout      time.Duration
@@ -36,11 +35,11 @@ type options struct {
 func defaultOptions() options {
 	// TODO: verify defaults
 	return options{
-		messageHandlers: make(map[string][]MessageHandler),
+		messageHandlers: make(map[string]MessageHandler),
 		requestHandlers: make(map[string]RequestHandler),
 		codec:           DefaultCodec{},
 		errorHandler:    func(err error) { fmt.Fprintln(os.Stderr, err) },
-		cliqueName:      defaultCliqueName,
+		clique:          defaultClique,
 		nodeKey:         nil, // will be set in 'apply'
 		stabilization: Stabilization{
 			Successors:  5,
@@ -58,6 +57,12 @@ func (o *options) apply(opts ...Option) error {
 		}
 	}
 
+	if o.messageHandlers[o.clique] != nil || o.requestHandlers[o.clique] != nil {
+		return optionError("cannot subscribe to clique stream")
+	} else if node := nodeStream(o.clique, o.nodeKey); o.messageHandlers[node] != nil || o.requestHandlers[node] != nil {
+		return optionError("cannot subscribe to node stream")
+	}
+
 	if len(o.nodeKey) == 0 {
 		o.nodeKey = alloc(KeySize, nil)
 		if err := randomKey(o.nodeKey); err != nil {
@@ -69,8 +74,8 @@ func (o *options) apply(opts ...Option) error {
 
 // WithMessageHandler defines a handler for incoming messages of the
 // specified stream. These messages are partitioned within the clique
-// the broker is assigned to. A broker can have multiple message
-// handlers per stream.
+// the broker is assigned to. A broker can only have a single message
+// or request handler per stream.
 func WithMessageHandler(stream string, h MessageHandler) Option {
 	return func(o *options) error {
 		switch {
@@ -78,17 +83,21 @@ func WithMessageHandler(stream string, h MessageHandler) Option {
 			return optionError("no message stream specified")
 		case h == nil:
 			return optionError("no message handler specified")
+		case o.messageHandlers[stream] != nil:
+			return optionError("message handler for stream '" + stream + "' already exists")
+		case o.requestHandlers[stream] != nil:
+			return optionError("request handler for stream '" + stream + "' already exists")
 		}
 
-		o.messageHandlers[stream] = append(o.messageHandlers[stream], h)
+		o.messageHandlers[stream] = h
 		return nil
 	}
 }
 
 // WithRequestHandler defines a handler for incoming requests of the
 // specified stream. These requests are partitioned within the clique
-// the broker is assigned to. A broker can only have a one request
-// handler per stream.
+// the broker is assigned to. A broker can only have a single message
+// or request handler per stream.
 func WithRequestHandler(stream string, h RequestHandler) Option {
 	return func(o *options) error {
 		switch {
@@ -96,6 +105,8 @@ func WithRequestHandler(stream string, h RequestHandler) Option {
 			return optionError("no request stream specified")
 		case h == nil:
 			return optionError("no request handler specified")
+		case o.messageHandlers[stream] != nil:
+			return optionError("message handler for stream '" + stream + "' already exists")
 		case o.requestHandlers[stream] != nil:
 			return optionError("request handler for stream '" + stream + "' already exists")
 		}
@@ -128,10 +139,10 @@ func WithErrorHandler(f func(error)) Option {
 func WithPartition(clique string, key Key) Option {
 	return func(o *options) error {
 		if clique == "" {
-			clique = defaultCliqueName
+			clique = defaultClique
 		}
 
-		o.cliqueName = clique
+		o.clique = clique
 		o.nodeKey = alloc(KeySize, o.nodeKey)
 		copy(o.nodeKey, key[:])
 		return nil
@@ -187,10 +198,4 @@ func WithAckTimeout(d time.Duration) Option {
 		o.ackTimeout = d
 		return nil
 	}
-}
-
-func defaultNodeKey() (key, error) {
-	k := alloc(KeySize, nil)
-	_, err := rand.Read(k)
-	return k, err
 }

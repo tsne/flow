@@ -1,8 +1,8 @@
 // Package flow provides a message streaming framework with pluggable pub/sub
-// system and an optional storage. The message passing and distribution is
-// managed by brokers which are clustered into cliques. A clique can be manually
-// assigned to a broker. If none is set, a default clique will be used. Brokers
-// within one clique are arranged on a ring where each broker has its own node key
+// system. The message passing and distribution is managed by brokers which are
+// clustered into cliques. A clique can be manually assigned to a broker. If
+// none is set, a default clique will be used. Brokers within the same clique
+// are arranged in a ring structure where each broker has its own node key
 // assigned. All incoming messages use a partition key to decide which broker
 // in the clique is responsible for which message.
 //

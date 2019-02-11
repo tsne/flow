@@ -2,6 +2,7 @@ package flow
 
 import (
 	"context"
+	"encoding/hex"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,23 +20,30 @@ type MessageHandler func(context.Context, Message)
 // copy the data which should be reused.
 type RequestHandler func(context.Context, Message) Message
 
-type pendingAck struct {
+type reply struct {
+	data []byte
+	err  error
+}
+
+type pendingReply struct {
 	receiver key
-	errch    chan error
+	replych  chan reply
 }
 
 // Broker represents a single node within a clique. It enables
 // the publishing and subscribing capabilities of the pub/sub
 // system. Each subscribed message is handled by the responsible
-// broker, which is determined by the respective node key.
+// broker, which is determined by the respective node key within a
+// clique.
 type Broker struct {
 	messagesInFlight uint64
 	requestsInFlight uint64
 	shuttingDown     uint64
 
+	clique     string
+	ackTimeout time.Duration
 	codec      Codec
 	onError    func(error)
-	ackTimeout time.Duration
 
 	routing routingTable
 	pubsub  pubsub
@@ -44,14 +52,11 @@ type Broker struct {
 	wg      sync.WaitGroup
 	leaving chan struct{}
 
-	pendingAckMtx sync.Mutex
-	pendingAcks   map[uint64]pendingAck // id => pending ack
+	pendingRepliesMtx sync.Mutex
+	pendingReplies    map[uint64]pendingReply // id => pending reply
 
-	pendingRespMtx sync.Mutex
-	pendingResps   map[uint64]chan Message // id => response channel
-
-	messageHandlers map[string][]MessageHandler // stream => message handlers
-	requestHandlers map[string]RequestHandler   // stream => request handler
+	messageHandlers map[string]MessageHandler // stream => message handler
+	requestHandlers map[string]RequestHandler // stream => request handler
 }
 
 // NewBroker creates a new broker which uses the pub/sub system
@@ -67,40 +72,45 @@ func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error)
 	}
 
 	b := &Broker{
+		clique:          opts.clique,
+		ackTimeout:      opts.ackTimeout,
 		codec:           opts.codec,
 		onError:         opts.errorHandler,
-		ackTimeout:      opts.ackTimeout,
 		routing:         newRoutingTable(opts),
 		pubsub:          newPubSub(pubsub, opts),
 		leaving:         make(chan struct{}),
-		pendingAcks:     make(map[uint64]pendingAck),
-		pendingResps:    make(map[uint64]chan Message),
+		pendingReplies:  make(map[uint64]pendingReply),
 		messageHandlers: opts.messageHandlers,
 		requestHandlers: opts.requestHandlers,
 	}
 
-	err := b.pubsub.subscribeClique(ctx, b.processCliqueProtocol)
-	if err != nil {
+	if err := b.pubsub.subscribe(ctx, nodeStream(b.clique, b.routing.local), "", b.processCliqueProtocol); err != nil {
+		b.pubsub.shutdown(ctx)
+		return nil, err
+	}
+
+	if err := b.pubsub.subscribe(ctx, b.clique, "", b.processCliqueProtocol); err != nil {
+		b.pubsub.shutdown(ctx)
 		return nil, err
 	}
 
 	for stream := range b.messageHandlers {
-		if err := b.pubsub.subscribe(ctx, stream, b.processMessage); err != nil {
-			b.pubsub.unsubscribeAll(ctx)
+		if err := b.pubsub.subscribe(ctx, stream, b.clique, b.processMessage); err != nil {
+			b.pubsub.shutdown(ctx)
 			return nil, err
 		}
 	}
 
 	for stream := range b.requestHandlers {
-		if err := b.pubsub.subscribe(ctx, stream, b.processRequest); err != nil {
-			b.pubsub.unsubscribeAll(ctx)
+		if err := b.pubsub.subscribe(ctx, stream, b.clique, b.processRequest); err != nil {
+			b.pubsub.shutdown(ctx)
 			return nil, err
 		}
 	}
 
-	join := marshalJoin(join{sender: b.routing.local}, nil)
-	if err := b.pubsub.sendToClique(ctx, join); err != nil {
-		b.pubsub.unsubscribeAll(ctx)
+	join := marshalJoin(join{sender: b.routing.local})
+	if err := b.broadcast(ctx, join); err != nil {
+		b.pubsub.shutdown(ctx)
 		return nil, err
 	}
 
@@ -147,7 +157,7 @@ func (b *Broker) Publish(ctx context.Context, msg Message) error {
 	if err := msg.validate(); err != nil {
 		return err
 	}
-	return b.pubsub.publish(ctx, msg.Stream, b.codec.EncodeMessage(msg))
+	return b.pubsub.send(ctx, msg.Stream, b.codec.EncodeMessage(msg))
 }
 
 // Request sends a request message and waits for its response.
@@ -155,89 +165,94 @@ func (b *Broker) Publish(ctx context.Context, msg Message) error {
 // by a random broker within a clique.
 // All binary data of the passed message needs to be valid only during
 // the method call.
-func (b *Broker) Request(ctx context.Context, msg Message) (Message, error) {
+func (b *Broker) Request(ctx context.Context, request Message) (Message, error) {
 	if b.isShuttingDown() {
 		return Message{}, ErrClosed
 	}
-	if err := msg.validate(); err != nil {
+	if err := request.validate(); err != nil {
 		return Message{}, err
 	}
 
-	return b.sendRequest(ctx, msg.Stream, req{
-		id:    b.nextID(),
-		reply: b.routing.local,
-		msg:   msg,
+	id := b.nextID()
+	reply := b.awaitReply(ctx, id, nil, func(ctx context.Context) error {
+		return b.pubsub.send(ctx, request.Stream, marshalMsg(msg{
+			id:     id,
+			reply:  b.routing.local,
+			stream: []byte(request.Stream),
+			pkey:   request.PartitionKey,
+			data:   request.Data,
+		}))
 	})
+	return Message{Data: reply.data}, reply.err
 }
 
 func (b *Broker) processMessage(ctx context.Context, stream string, data []byte) {
 	atomic.AddUint64(&b.messagesInFlight, 1)
 	defer atomic.AddUint64(&b.messagesInFlight, ^uint64(0))
 
-	var (
-		req req
-		err error
-	)
-	req.msg, err = b.codec.DecodeMessage(stream, data)
+	decoded, err := b.codec.DecodeMessage(stream, data)
 	if err != nil {
-		b.onError(errorf("unmarshal message: %v", err))
+		b.onError(errorf("decode message: %v", err))
 		return
 	}
 
-	if len(req.msg.PartitionKey) == 0 {
-		b.dispatchMsg(ctx, req)
-	} else {
-		pkey := KeyFromBytes(req.msg.PartitionKey)
-		b.forward(ctx, req, pkey[:], b.dispatchMsg)
-	}
+	b.forwardMsg(ctx, msg{
+		stream: []byte(decoded.Stream),
+		pkey:   decoded.PartitionKey,
+		data:   decoded.Data,
+	})
 }
 
 func (b *Broker) processRequest(ctx context.Context, stream string, data []byte) {
 	atomic.AddUint64(&b.requestsInFlight, 1)
 	defer atomic.AddUint64(&b.requestsInFlight, ^uint64(0))
 
-	frame, err := frameFromBytes(data)
+	f, err := frameFromBytes(data)
 	switch {
 	case err != nil:
 		b.onError(errorf("request subscription: %v", err))
 		return
-	case frame.typ() != frameTypeReq:
-		b.onError(errorf("unexpected request frame type: %s", frame.typ()))
+	case f.typ() != frameTypeMsg:
+		b.onError(errorf("unexpected request frame type: %s", f.typ()))
 		return
 	}
 
-	b.handleReq(ctx, frame)
+	msg, err := unmarshalMsg(f)
+	if err != nil {
+		b.onError(errorf("unmarshal msg: %v", err))
+		return
+	}
+
+	b.forwardMsg(ctx, msg)
 }
 
 func (b *Broker) processCliqueProtocol(ctx context.Context, stream string, data []byte) {
-	frame, err := frameFromBytes(data)
+	f, err := frameFromBytes(data)
 	if err != nil {
 		b.onError(errorf("clique subscription: %v", err))
 		return
 	}
 
-	switch frame.typ() {
+	switch f.typ() {
 	case frameTypeJoin:
-		b.handleJoin(ctx, frame)
+		b.handleJoin(ctx, f)
 	case frameTypeLeave:
-		b.handleLeave(frame)
+		b.handleLeave(f)
 	case frameTypeInfo:
-		b.handleInfo(frame)
+		b.handleInfo(f)
 	case frameTypePing:
-		b.handlePing(ctx, frame)
+		b.handlePing(ctx, f)
 	case frameTypeFwd:
-		b.handleFwd(ctx, frame)
+		b.handleFwd(ctx, f)
 	case frameTypeAck:
-		b.handleAck(frame)
-	case frameTypeResp:
-		b.handleResp(frame)
+		b.handleAck(f)
 	default:
-		b.onError(errorf("unexpected clique frame type: %s", frame.typ()))
+		b.onError(errorf("unexpected clique frame type: %s", f.typ()))
 	}
 }
 
-func (b *Broker) handleJoin(ctx context.Context, frame frame) {
-	join, err := unmarshalJoin(frame)
+func (b *Broker) handleJoin(ctx context.Context, f frame) {
+	join, err := unmarshalJoin(f)
 	switch {
 	case err != nil:
 		b.onError(errorf("unmarshal join: %v", err))
@@ -249,14 +264,14 @@ func (b *Broker) handleJoin(ctx context.Context, frame frame) {
 	neighbors := b.routing.neighbors(nil)
 	b.routing.register(keys(join.sender))
 
-	sender := join.sender.array()
-	b.sendTo(ctx, sender[:], marshalInfo(info{
-		neighbors: neighbors,
-	}, frame))
+	err = b.sendTo(ctx, join.sender, marshalInfo(info{neighbors: neighbors}))
+	if err != nil {
+		b.onError(errorf("send info: %v", err))
+	}
 }
 
-func (b *Broker) handleLeave(frame frame) {
-	leave, err := unmarshalLeave(frame)
+func (b *Broker) handleLeave(f frame) {
+	leave, err := unmarshalLeave(f)
 	if err != nil {
 		b.onError(errorf("unmarshal leave: %v", err))
 		return
@@ -265,43 +280,46 @@ func (b *Broker) handleLeave(frame frame) {
 	b.routing.unregister(leave.node)
 }
 
-func (b *Broker) handleInfo(frame frame) {
-	info, err := unmarshalInfo(frame)
+func (b *Broker) handleInfo(f frame) {
+	info, err := unmarshalInfo(f)
 	if err != nil {
 		b.onError(errorf("unmarshal info: %v", err))
 		return
 	}
 
 	b.routing.register(info.neighbors)
-	b.notifyAck(info.id, nil)
+	b.notifyReply(info.id, reply{})
 }
 
-func (b *Broker) handlePing(ctx context.Context, frame frame) {
-	ping, err := unmarshalPing(frame)
+func (b *Broker) handlePing(ctx context.Context, f frame) {
+	ping, err := unmarshalPing(f)
 	if err != nil {
 		b.onError(errorf("unmarshal ping: %v", err))
 		return
 	}
 
-	sender := ping.sender.array()
-	b.sendTo(ctx, sender[:], marshalInfo(info{
+	err = b.sendTo(ctx, ping.sender, marshalInfo(info{
 		id:        ping.id,
 		neighbors: b.routing.neighbors(nil),
-	}, frame))
+	}))
+	if err != nil {
+		b.onError(errorf("send info: %v", err))
+	}
 }
 
-func (b *Broker) handleFwd(ctx context.Context, frame frame) {
-	fwd, err := unmarshalFwd(frame)
+func (b *Broker) handleFwd(ctx context.Context, f frame) {
+	fwd, err := unmarshalFwd(f)
 	if err != nil {
 		b.onError(errorf("unmarshal fwd: %v", err))
 		return
 	}
 
-	b.sendTo(ctx, fwd.ack, marshalAck(ack{
-		id: fwd.id,
-	}, nil))
+	err = b.sendTo(ctx, fwd.ack, marshalAck(ack{id: fwd.id}))
+	if err != nil {
+		b.onError(errorf("send ack: %v", err))
+	}
 
-	b.forward(ctx, req{msg: fwd.msg}, fwd.pkey, b.dispatchMsg)
+	b.forwardMsg(ctx, fwd.msg)
 }
 
 func (b *Broker) handleAck(frame frame) {
@@ -311,78 +329,45 @@ func (b *Broker) handleAck(frame frame) {
 		return
 	}
 
-	b.notifyAck(ack.id, nil)
+	b.notifyReply(ack.id, reply{data: ack.data})
 }
 
-func (b *Broker) handleReq(ctx context.Context, frame frame) {
-	req, err := unmarshalReq(frame)
-	if err != nil {
-		b.onError(errorf("unmarshal req: %v", err))
+func (b *Broker) forwardMsg(ctx context.Context, msg msg) {
+	if len(msg.pkey) == 0 {
+		b.dispatchMsg(ctx, msg)
 		return
 	}
 
-	if len(req.msg.PartitionKey) == 0 {
-		b.dispatchReq(ctx, req)
-	} else {
-		pkey := KeyFromBytes(req.msg.PartitionKey)
-		b.forward(ctx, req, pkey[:], b.dispatchReq)
-	}
-}
-
-func (b *Broker) handleResp(frame frame) {
-	resp, err := unmarshalResp(frame)
-	if err != nil {
-		b.onError(errorf("unmarshal resp: %v", err))
-		return
-	}
-
-	b.notifyResp(resp.id, resp.msg)
-}
-
-func (b *Broker) dispatchMsg(ctx context.Context, req req) {
-	for _, h := range b.messageHandlers[req.msg.Stream] {
-		h(ctx, req.msg)
-	}
-}
-
-func (b *Broker) dispatchReq(ctx context.Context, req req) {
-	if h := b.requestHandlers[req.msg.Stream]; h != nil {
-		b.sendTo(ctx, req.reply, marshalResp(resp{
-			id:  req.id,
-			msg: h(ctx, req.msg),
-		}, nil))
-	}
-}
-
-// returns true for local dispatch
-func (b *Broker) forward(ctx context.Context, req req, pkey key, dispatch func(context.Context, req)) {
 	var (
-		id       uint64
-		fwdframe frame
 		keybuf   Key
+		fwdFrame frame
+		id       uint64
 	)
+
+	partition := KeyFromBytes(msg.pkey)
 	for {
-		succ := b.routing.successor(pkey[:], keybuf[:])
+		succ := b.routing.successor(partition[:], keybuf[:])
 		if len(succ) == 0 {
-			dispatch(ctx, req)
+			b.dispatchMsg(ctx, msg)
 			return
 		}
 
-		if len(fwdframe) == 0 {
+		if len(fwdFrame) == 0 {
 			id = b.nextID()
-			fwdframe = marshalFwd(fwd{
-				id:   id,
-				ack:  b.routing.local,
-				pkey: pkey[:],
-				msg:  req.msg,
-			}, nil)
+			fwdFrame = marshalFwd(fwd{
+				id:  id,
+				ack: b.routing.local,
+				msg: msg,
+			})
 		}
 
-		err := b.sendFrame(ctx, id, succ, fwdframe)
-		if err == nil {
+		reply := b.awaitReply(ctx, id, succ, func(ctx context.Context) error {
+			return b.sendTo(ctx, succ, fwdFrame)
+		})
+		if reply.err == nil {
 			return
-		} else if err != context.DeadlineExceeded {
-			b.onError(err)
+		} else if reply.err != context.DeadlineExceeded {
+			b.onError(reply.err)
 			return
 		}
 
@@ -392,83 +377,80 @@ func (b *Broker) forward(ctx context.Context, req req, pkey key, dispatch func(c
 	}
 }
 
-// send a frame to a node and wait for an ack
-func (b *Broker) sendFrame(ctx context.Context, ackID uint64, receiver key, frame frame) error {
-	errch := make(chan error, 1)
-	b.pendingAckMtx.Lock()
-	b.pendingAcks[ackID] = pendingAck{
-		receiver: receiver,
-		errch:    errch,
+func (b *Broker) dispatchMsg(ctx context.Context, msg msg) {
+	var reply reply
+	if h := b.messageHandlers[string(msg.stream)]; h != nil {
+		h(ctx, Message{
+			Stream:       string(msg.stream),
+			PartitionKey: msg.pkey,
+			Data:         msg.data,
+		})
+	} else if h := b.requestHandlers[string(msg.stream)]; h != nil {
+		resp := h(ctx, Message{
+			Stream:       string(msg.stream),
+			PartitionKey: msg.pkey,
+			Data:         msg.data,
+		})
+		reply.data = resp.Data
+	} else {
+		return
 	}
-	b.pendingAckMtx.Unlock()
+
+	if len(msg.reply) != 0 {
+		ack := ack{id: msg.id, data: reply.data}
+		err := b.sendTo(ctx, msg.reply, marshalAck(ack))
+		if err != nil {
+			b.onError(errorf("send ack: %v", err))
+		}
+	}
+}
+
+func (b *Broker) awaitReply(ctx context.Context, id uint64, receiver key, send func(context.Context) error) reply {
+	replych := make(chan reply, 1)
+	b.pendingRepliesMtx.Lock()
+	b.pendingReplies[id] = pendingReply{
+		receiver: receiver,
+		replych:  replych,
+	}
+	b.pendingRepliesMtx.Unlock()
+
+	if err := send(ctx); err != nil {
+		b.notifyReply(id, reply{err: err})
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, b.ackTimeout)
 	defer cancel()
 
-	if err := b.pubsub.sendToNode(ctx, receiver, frame); err != nil {
-		b.notifyAck(ackID, err)
-	}
-
 	select {
-	case err := <-errch:
-		return err
+	case reply := <-replych:
+		return reply
 	case <-ctx.Done():
-		err := ctx.Err()
-		b.notifyAck(ackID, err)
-		return err
+		reply := reply{err: ctx.Err()}
+		b.notifyReply(id, reply)
+		return reply
 	}
 }
 
-func (b *Broker) notifyAck(ackID uint64, err error) {
-	b.pendingAckMtx.Lock()
-	ack, has := b.pendingAcks[ackID]
-	delete(b.pendingAcks, ackID)
-	b.pendingAckMtx.Unlock()
+func (b *Broker) notifyReply(id uint64, reply reply) {
+	b.pendingRepliesMtx.Lock()
+	pending, has := b.pendingReplies[id]
+	delete(b.pendingReplies, id)
+	b.pendingRepliesMtx.Unlock()
 
 	if has {
-		if err == context.DeadlineExceeded {
-			b.routing.suspect(ack.receiver)
+		if reply.err == context.DeadlineExceeded && len(pending.receiver) != 0 {
+			b.routing.suspect(pending.receiver)
 		}
-		ack.errch <- err
+		pending.replych <- reply
 	}
 }
 
-// send a request to a node and wait for a response
-func (b *Broker) sendRequest(ctx context.Context, stream string, req req) (Message, error) {
-	msgch := make(chan Message, 1)
-	b.pendingRespMtx.Lock()
-	b.pendingResps[req.id] = msgch
-	b.pendingRespMtx.Unlock()
-
-	err := b.pubsub.publish(ctx, stream, marshalReq(req, nil))
-	if err != nil {
-		b.notifyResp(req.id, Message{})
-	}
-
-	select {
-	case msg := <-msgch:
-		return msg, err
-	case <-ctx.Done():
-		b.notifyResp(req.id, Message{})
-		return Message{}, ctx.Err()
-	}
+func (b *Broker) sendTo(ctx context.Context, target key, f frame) error {
+	return b.pubsub.send(ctx, nodeStream(b.clique, target), f)
 }
 
-func (b *Broker) notifyResp(reqID uint64, msg Message) {
-	b.pendingRespMtx.Lock()
-	msgch, has := b.pendingResps[reqID]
-	delete(b.pendingResps, reqID)
-	b.pendingRespMtx.Unlock()
-
-	if has {
-		msgch <- msg
-	}
-}
-
-func (b *Broker) sendTo(ctx context.Context, target key, frame frame) {
-	if err := b.pubsub.sendToNode(ctx, target, frame); err != nil {
-		b.onError(errorf("send to node: %v", err))
-	}
+func (b *Broker) broadcast(ctx context.Context, f frame) error {
+	return b.pubsub.send(ctx, b.clique, f)
 }
 
 func (b *Broker) nextID() uint64 {
@@ -483,24 +465,24 @@ func (b *Broker) shutdown(ctx context.Context, wait func() error) error {
 	atomic.StoreUint64(&b.shuttingDown, 1)
 	close(b.leaving)
 
-	leave := marshalLeave(leave{node: b.routing.local}, nil)
-	err := b.pubsub.sendToClique(ctx, leave)
+	leave := marshalLeave(leave{node: b.routing.local})
+	err := b.broadcast(ctx, leave)
 
 	if waitErr := wait(); waitErr != nil {
 		err = waitErr
 	}
 
-	b.pubsub.unsubscribeAll(ctx)
+	b.pubsub.shutdown(ctx)
 
-	// cancel pending acks
-	b.pendingAckMtx.Lock()
-	ids := make([]uint64, 0, len(b.pendingAcks))
-	for id := range b.pendingAcks {
+	// cancel pending replies
+	b.pendingRepliesMtx.Lock()
+	ids := make([]uint64, 0, len(b.pendingReplies))
+	for id := range b.pendingReplies {
 		ids = append(ids, id)
 	}
-	b.pendingAckMtx.Unlock()
+	b.pendingRepliesMtx.Unlock()
 	for _, id := range ids {
-		b.notifyAck(id, ErrClosed)
+		b.notifyReply(id, reply{err: ErrClosed})
 	}
 
 	b.wg.Wait()
@@ -515,9 +497,8 @@ func (b *Broker) stabilize(interval time.Duration) {
 	defer ticker.Stop()
 
 	var (
-		frame  frame
-		stabs  keys
-		nstabs int
+		frame frame
+		stabs keys
 	)
 
 	for {
@@ -528,17 +509,26 @@ func (b *Broker) stabilize(interval time.Duration) {
 		}
 
 		stabs = b.routing.stabilizers(stabs)
-		nstabs = stabs.length()
-
-		for i := 0; i < nstabs; i++ {
+		for i, n := 0, stabs.length(); i < n; i++ {
 			stab := stabs.at(i)
 			ping.id = b.nextID()
 			frame = marshalPing(ping, frame)
 
-			err := b.sendFrame(context.Background(), ping.id, stab, frame)
-			if err != nil && err != ErrClosed && err != context.DeadlineExceeded {
-				b.onError(errorf("stabilization: %v", err))
+			reply := b.awaitReply(context.Background(), ping.id, stab, func(ctx context.Context) error {
+				return b.sendTo(ctx, stab, frame)
+			})
+
+			if reply.err != nil && reply.err != ErrClosed && reply.err != context.DeadlineExceeded {
+				b.onError(errorf("stabilization: %v", reply.err))
 			}
 		}
 	}
+}
+
+func nodeStream(clique string, node key) string {
+	buf := alloc(len(clique)+1+2*KeySize, nil)
+	n := copy(buf, clique)
+	buf[n] = '.'
+	hex.Encode(buf[n+1:], node)
+	return string(buf)
 }

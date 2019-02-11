@@ -59,12 +59,6 @@ func (k key) equal(other key) bool {
 	return bytes.Equal(k, other)
 }
 
-func (k key) array() [KeySize]byte {
-	var res [KeySize]byte
-	copy(res[:], k)
-	return res
-}
-
 func (k key) clone(buf key) key {
 	buf = alloc(KeySize, buf)
 	copy(buf, k)

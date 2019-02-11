@@ -15,10 +15,9 @@ const (
 	errMalformedLeave   = protocolError("malformed leave")
 	errMalformedInfo    = protocolError("malformed info")
 	errMalformedPing    = protocolError("malformed ping")
+	errMalformedMsg     = protocolError("malformed msg")
 	errMalformedFwd     = protocolError("malformed fwd")
 	errMalformedAck     = protocolError("malformed ack")
-	errMalformedReq     = protocolError("malformed req")
-	errMalformedResp    = protocolError("malformed resp")
 	errMalformedMessage = protocolError("malformed message")
 )
 

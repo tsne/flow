@@ -1,9 +1,9 @@
 package flow
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
-	"time"
 )
 
 func TestFrameTypeString(t *testing.T) {
@@ -29,11 +29,11 @@ func TestFrameFromBytes(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	frame, err := frameFromBytes(make([]byte, headerLen))
+	frame, err := frameFromBytes(make([]byte, frameHeaderLen))
 	switch {
 	case err != nil:
 		t.Errorf("unexpected error: %v", err)
-	case len(frame) != headerLen:
+	case len(frame) != frameHeaderLen:
 		t.Errorf("unexpected frame length: %d", len(frame))
 	}
 }
@@ -67,7 +67,7 @@ func TestMarshalJoin(t *testing.T) {
 		sender: intKey(7),
 	}
 
-	frame := marshalJoin(join, nil)
+	frame := marshalJoin(join)
 	switch {
 	case frame.typ() != frameTypeJoin:
 		t.Fatalf("unexpected frame type: %s", frame.typ())
@@ -89,7 +89,7 @@ func TestMarshalLeave(t *testing.T) {
 		node: intKey(7),
 	}
 
-	frame := marshalLeave(leave, nil)
+	frame := marshalLeave(leave)
 	switch {
 	case frame.typ() != frameTypeLeave:
 		t.Fatalf("unexpected frame type: %s", frame.typ())
@@ -112,7 +112,7 @@ func TestMarshalInfo(t *testing.T) {
 		neighbors: intKeys(1, 2, 3, 4),
 	}
 
-	frame := marshalInfo(info, nil)
+	frame := marshalInfo(info)
 	switch {
 	case frame.typ() != frameTypeInfo:
 		t.Fatalf("unexpected frame type: %s", frame.typ())
@@ -154,14 +154,15 @@ func TestMarshalPing(t *testing.T) {
 
 func TestMarshalAck(t *testing.T) {
 	ack := ack{
-		id: 7,
+		id:   7,
+		data: []byte("ack data"),
 	}
 
-	frame := marshalAck(ack, nil)
+	frame := marshalAck(ack)
 	switch {
 	case frame.typ() != frameTypeAck:
 		t.Fatalf("unexpected frame type: %s", frame.typ())
-	case len(frame.payload()) != 8:
+	case len(frame.payload()) != 16:
 		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
@@ -175,24 +176,24 @@ func TestMarshalAck(t *testing.T) {
 }
 
 func TestMarshalFwd(t *testing.T) {
-	keys := intKeys(1, 2)
+	key := intKey(1)
 	fwd := fwd{
-		id:   7,
-		ack:  keys.at(0),
-		pkey: keys.at(1),
-		msg: Message{
-			Stream:       "stream",
-			Time:         time.Date(1988, time.September, 26, 1, 0, 0, 0, time.UTC),
-			PartitionKey: []byte("partition key"),
-			Data:         []byte("payload"),
+		id:  7,
+		ack: key,
+		msg: msg{
+			id:     13,
+			reply:  []byte("reply"),
+			stream: []byte("stream"),
+			pkey:   []byte("partition key"),
+			data:   []byte("payload"),
 		},
 	}
 
-	frame := marshalFwd(fwd, nil)
+	frame := marshalFwd(fwd)
 	switch {
 	case frame.typ() != frameTypeFwd:
 		t.Fatalf("unexpected frame type: %s", frame.typ())
-	case len(frame.payload()) != 58+2*KeySize:
+	case len(frame.payload()) != 59+KeySize:
 		t.Fatalf("unexpected frame payload length: %d", len(frame.payload()))
 	}
 
@@ -203,4 +204,18 @@ func TestMarshalFwd(t *testing.T) {
 	case !reflect.DeepEqual(fwd, unmarshalled):
 		t.Fatalf("unexpected fwd frame: %#v", unmarshalled)
 	}
+}
+
+func newMsg(m Message) msg {
+	return msg{
+		stream: []byte(m.Stream),
+		pkey:   m.PartitionKey,
+		data:   m.Data,
+	}
+}
+
+func equalMsg(left, right msg) bool {
+	return bytes.Equal(left.stream, right.stream) &&
+		bytes.Equal(left.pkey, right.pkey) &&
+		bytes.Equal(left.data, right.data)
 }

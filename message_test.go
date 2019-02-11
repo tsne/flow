@@ -32,7 +32,7 @@ func TestMessageEncoding(t *testing.T) {
 }
 
 func equalMessage(left, right Message) bool {
-	return left.Time.Equal(right.Time) &&
+	return left.Stream == right.Stream &&
 		bytes.Equal(left.PartitionKey, right.PartitionKey) &&
 		bytes.Equal(left.Data, right.Data)
 }

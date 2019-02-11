@@ -3,10 +3,9 @@ package flow
 import "sync"
 
 type routingTable struct {
-	// immutable fields
-	local           key
-	successorCount  int
-	stabilizerCount int
+	local           key // immutable
+	successorCount  int // immutable
+	stabilizerCount int // immutable
 
 	mtx     sync.RWMutex
 	keys    ring

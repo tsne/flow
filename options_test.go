@@ -18,8 +18,8 @@ func TestDefaultOptions(t *testing.T) {
 		t.Fatalf("unexpected codec: %T", opts.codec)
 	case opts.errorHandler == nil:
 		t.Fatal("expected error handler, got none")
-	case opts.cliqueName == "":
-		t.Fatal("unexpected empty clique name")
+	case opts.clique == "":
+		t.Fatal("unexpected empty clique")
 	case opts.stabilization.Successors <= 0:
 		t.Fatalf("unexpected stabilization successor count: %d", opts.stabilization.Successors)
 	case opts.stabilization.Stabilizers <= 0:
@@ -45,8 +45,8 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 		t.Fatalf("unexpected request handlers: %v", opts.requestHandlers)
 	case opts.codec != defaultOpts.codec:
 		t.Fatalf("unexpected codec: %T", opts.codec)
-	case opts.cliqueName != defaultOpts.cliqueName:
-		t.Fatalf("unexpected clique name: %s", opts.cliqueName)
+	case opts.clique != defaultOpts.clique:
+		t.Fatalf("unexpected clique: %s", opts.clique)
 	case len(opts.nodeKey) == 0:
 		t.Fatal("expected node id to be not empty")
 	case opts.stabilization.Successors != defaultOpts.stabilization.Successors:
@@ -62,7 +62,7 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 
 func TestOptionWithMessageHandler(t *testing.T) {
 	opts := options{
-		messageHandlers: make(map[string][]MessageHandler),
+		messageHandlers: make(map[string]MessageHandler),
 	}
 
 	h := func(context.Context, Message) {}
@@ -84,6 +84,16 @@ func TestOptionWithMessageHandler(t *testing.T) {
 		t.Fatalf("unexpected number of message handlers: %d", len(opts.messageHandlers))
 	case opts.messageHandlers["stream"] == nil:
 		t.Fatal("missing message handler for stream")
+	}
+
+	err = opts.apply(WithMessageHandler("stream", h))
+	if err == nil {
+		t.Fatal("error expected, got none")
+	}
+
+	err = opts.apply(WithRequestHandler("stream", func(context.Context, Message) Message { return Message{} }))
+	if err == nil {
+		t.Fatal("error expected, got none")
 	}
 }
 
@@ -111,6 +121,16 @@ func TestOptionWithRequestHandler(t *testing.T) {
 		t.Fatalf("unexpected number of request handlers: %d", len(opts.requestHandlers))
 	case opts.requestHandlers["stream"] == nil:
 		t.Fatal("missing request handler for stream")
+	}
+
+	err = opts.apply(WithRequestHandler("stream", h))
+	if err == nil {
+		t.Fatal("error expected, got none")
+	}
+
+	err = opts.apply(WithMessageHandler("stream", func(context.Context, Message) {}))
+	if err == nil {
+		t.Fatal("error expected, got none")
 	}
 }
 
@@ -143,8 +163,8 @@ func TestOptionWithPartition(t *testing.T) {
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
-	case opts.cliqueName != defaultCliqueName:
-		t.Fatalf("unexpected clique name: %s", err)
+	case opts.clique != defaultClique:
+		t.Fatalf("unexpected clique: %s", opts.clique)
 	case !bytes.Equal(opts.nodeKey, key[:]):
 		t.Fatalf("unexpected node key: %s", printableKey(opts.nodeKey))
 	}
@@ -154,8 +174,8 @@ func TestOptionWithPartition(t *testing.T) {
 	switch {
 	case err != nil:
 		t.Fatalf("unexpected error: %v", err)
-	case opts.cliqueName != "not-the-default-clique":
-		t.Fatalf("unexpected clique name: %s", opts.cliqueName)
+	case opts.clique != "not-the-default-clique":
+		t.Fatalf("unexpected clique: %s", opts.clique)
 	case !bytes.Equal(opts.nodeKey, key[:]):
 		t.Fatalf("unexpected node key: %s", printableKey(opts.nodeKey))
 	}

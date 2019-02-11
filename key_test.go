@@ -348,6 +348,12 @@ func TestRingSuccessor(t *testing.T) {
 	}
 }
 
+func newKey(k key) Key {
+	var res Key
+	copy(res[:], k)
+	return res
+}
+
 func intKey(n int) key {
 	return key(intKeys(n))
 }

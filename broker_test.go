@@ -11,7 +11,6 @@ import (
 func TestBrokerPublish(t *testing.T) {
 	ctx := context.Background()
 	pubsub := newPubsubRecorder()
-	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
 	b, err := NewBroker(ctx, pubsub,
 		disableStabilization(),
@@ -22,7 +21,6 @@ func TestBrokerPublish(t *testing.T) {
 
 	err = b.Publish(ctx, Message{
 		Stream:       "store-stream",
-		Time:         now,
 		PartitionKey: []byte("partition one"),
 		Data:         []byte("message data"),
 	})
@@ -33,25 +31,23 @@ func TestBrokerPublish(t *testing.T) {
 }
 
 func TestBrokerSubscription(t *testing.T) {
-	const cliqueName = "test-clique"
+	const clique = "test-clique"
 
 	ctx := context.Background()
-	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 	msg := Message{
 		Stream:       "message-stream",
-		Time:         now,
 		PartitionKey: []byte("partition one"),
 		Data:         []byte("message data"),
 	}
 
 	local := KeyFromBytes(msg.PartitionKey)
-	localStream := nodeStream(cliqueName, local[:])
+	localStream := nodeStream(clique, local[:])
 
 	messageChan := make(chan Message, 1)
 	pubsub := newPubsubRecorder()
 	b, err := NewBroker(ctx, pubsub,
 		WithMessageHandler(msg.Stream, func(_ context.Context, msg Message) { messageChan <- msg }),
-		WithPartition(cliqueName, local),
+		WithPartition(clique, local),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -81,7 +77,7 @@ func TestBrokerSubscription(t *testing.T) {
 		b.routing.register(keys(remote[:]))
 		defer b.routing.unregister(remote[:])
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote[:]))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote[:]))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -93,24 +89,32 @@ func TestBrokerSubscription(t *testing.T) {
 
 			frame := <-remoteChan
 			if frame.typ() != frameTypeFwd {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			fwdID := lastID(b)
 			fwd, err := unmarshalFwd(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
-			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !fwd.pkey.equal(remote[:]) || !equalMessage(fwd.msg, msg):
-				t.Fatalf("unexpected fwd: %+v", fwd)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
+			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !equalMsg(fwd.msg, newMsg(msg)):
+				t.Errorf("unexpected fwd: %+v", fwd)
+				t.Fail()
+				return
 			}
 
 			pubsub.Publish(ctx, localStream, marshalAck(ack{
 				id: fwdID,
-			}, nil))
+			}))
 
-			if hasPendingAck(b, fwdID) {
-				t.Fatalf("unexpected pending ack: %d", fwdID)
+			if hasPendingReply(b, fwdID) {
+				t.Errorf("unexpected pending reply: %d", fwdID)
+				t.Fail()
+				return
 			}
 		}()
 
@@ -118,6 +122,7 @@ func TestBrokerSubscription(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+
 	})
 
 	t.Run("forward-timeout", func(t *testing.T) {
@@ -134,7 +139,7 @@ func TestBrokerSubscription(t *testing.T) {
 		b.routing.register(keys(remote[:]))
 		defer b.routing.unregister(remote[:])
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote[:]))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote[:]))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -146,27 +151,39 @@ func TestBrokerSubscription(t *testing.T) {
 
 			frame := <-remoteChan
 			if frame.typ() != frameTypeFwd {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			fwdID := lastID(b)
 			fwd, err := unmarshalFwd(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
-			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !fwd.pkey.equal(remote[:]) || !equalMessage(fwd.msg, msg):
-				t.Fatalf("unexpected fwd: %+v", fwd)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
+			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !equalMsg(fwd.msg, newMsg(msg)):
+				t.Errorf("unexpected fwd: %+v", fwd)
+				t.Fail()
+				return
 			}
 
 			// dispatch locally
 			receivedMsg := <-messageChan
 			switch {
 			case !equalMessage(receivedMsg, msg):
-				t.Fatalf("unexpected message: %+v", receivedMsg)
-			case hasPendingAck(b, fwdID):
-				t.Fatalf("unexpected pending ack: %d", fwdID)
+				t.Errorf("unexpected message: %+v", receivedMsg)
+				t.Fail()
+				return
+			case hasPendingReply(b, fwdID):
+				t.Errorf("unexpected pending reply: %d", fwdID)
+				t.Fail()
+				return
 			case containsKey(keys(b.routing.keys), remote[:]):
-				t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+				t.Errorf("unexpected routing keys: %v", b.routing.keys)
+				t.Fail()
+				return
 			}
 		}()
 
@@ -178,19 +195,20 @@ func TestBrokerSubscription(t *testing.T) {
 }
 
 func TestBrokerCliqueProtocol(t *testing.T) {
-	const cliqueName = "test-clique"
+	const clique = "test-clique"
 
 	ctx := context.Background()
-	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
-	local := intKey(1)
-	localStream := nodeStream(cliqueName, local)
+	localKey := []byte("local")
+	local := KeyFromBytes(localKey)
+	localStream := nodeStream(clique, local[:])
 
-	remote := intKey(2)
-	remoteStream := nodeStream(cliqueName, remote)
+	remoteKey := []byte("remote")
+	remote := KeyFromBytes(remoteKey)
+	remoteStream := nodeStream(clique, remote[:])
 
 	pubsub := newPubsubRecorder()
-	cliqueChan, cliqueSub := pubsub.SubscribeChan(ctx, cliqueName)
+	cliqueChan, cliqueSub := pubsub.SubscribeChan(ctx, clique)
 	defer cliqueSub.Unsubscribe(ctx)
 
 	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, remoteStream)
@@ -204,28 +222,34 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 
 		frame := <-cliqueChan
 		if frame.typ() != frameTypeJoin {
-			t.Fatalf("unexpected frame type: %s", frame.typ())
+			t.Errorf("unexpected frame type: %s", frame.typ())
+			t.Fail()
+			return
 		}
 
 		join, err := unmarshalJoin(frame)
 		switch {
 		case err != nil:
-			t.Fatalf("unexpected error: %v", err)
-		case !join.sender.equal(local):
-			t.Fatalf("unexpected join: %+v", join)
+			t.Errorf("unexpected error: %v", err)
+			t.Fail()
+			return
+		case !join.sender.equal(local[:]):
+			t.Errorf("unexpected join: %+v", join)
+			t.Fail()
+			return
 		}
 
 		pubsub.Publish(ctx, localStream, marshalInfo(info{
 			id:        13,
 			neighbors: intKeys(101, 102, 103),
-		}, nil))
+		}))
 	}()
 
 	const stream = "mystream"
 	incoming := make(chan Message, 1)
 	b, err := NewBroker(ctx, pubsub,
 		WithMessageHandler(stream, func(_ context.Context, m Message) { incoming <- m }),
-		WithPartition(cliqueName, local.array()),
+		WithPartition(clique, local),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -255,24 +279,30 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			_ = <-cliqueChan // consume JOIN
+			<-cliqueChan // consume JOIN
 			frame := <-remoteChan
 			if frame.typ() != frameTypeInfo {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			info, err := unmarshalInfo(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
 			case info.id != 0 || !equalKeys(info.neighbors, keys(b.routing.local)):
-				t.Fatalf("unexpected info: %+v", info)
+				t.Errorf("unexpected info: %+v", info)
+				t.Fail()
+				return
 			}
 		}()
 
-		pubsub.Publish(ctx, cliqueName, marshalJoin(join{sender: remote}, nil))
+		pubsub.Publish(ctx, clique, marshalJoin(join{sender: remote[:]}))
 
-		if !containsKey(keys(b.routing.keys), remote) {
+		if !containsKey(keys(b.routing.keys), remote[:]) {
 			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
 		}
 	})
@@ -291,21 +321,27 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 
 			frame := <-remoteChan
 			if frame.typ() != frameTypeInfo {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			info, err := unmarshalInfo(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
 			case info.id != id || !equalKeys(info.neighbors, expectedNeighbors):
-				t.Fatalf("unexpected info: %+v", info)
+				t.Errorf("unexpected info: %+v", info)
+				t.Fail()
+				return
 			}
 		}()
 
 		pubsub.Publish(ctx, localStream, marshalPing(ping{
 			id:     id,
-			sender: remote,
+			sender: remote[:],
 		}, nil))
 	})
 
@@ -319,7 +355,6 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 		id := b.nextID()
 		msg := Message{
 			Stream:       stream,
-			Time:         now,
 			PartitionKey: nil,
 			Data:         []byte("message data"),
 		}
@@ -329,24 +364,29 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 
 			frame := <-remoteChan
 			if frame.typ() != frameTypeAck {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			ack, err := unmarshalAck(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
 			case ack.id != id:
-				t.Fatalf("unexpected ack: %+v", ack)
+				t.Errorf("unexpected ack: %+v", ack)
+				t.Fail()
+				return
 			}
 		}()
 
 		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
-			id:   id,
-			ack:  remote,
-			pkey: local,
-			msg:  msg,
-		}, nil))
+			id:  id,
+			ack: remote[:],
+			msg: newMsg(msg),
+		}))
 
 		if in := <-incoming; !equalMessage(in, msg) {
 			t.Fatalf("unexpected incoming message: %+v", in)
@@ -358,14 +398,16 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 	//              --- fwd -->
 	//              <-- ack ---
 	t.Run("forward", func(t *testing.T) {
+		b.routing.register(remote[:])
+		defer b.routing.unregister(remote[:])
+
 		wg.Add(1)
 		defer wg.Wait()
 
 		id := b.nextID()
 		msg := Message{
 			Stream:       stream,
-			Time:         now,
-			PartitionKey: nil,
+			PartitionKey: remoteKey,
 			Data:         []byte("message data"),
 		}
 
@@ -375,47 +417,60 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 			// ack
 			frame := <-remoteChan
 			if frame.typ() != frameTypeAck {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			sentAck, err := unmarshalAck(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
-			case sentAck.id != id:
-				t.Fatalf("unexpected ack: %+v", sentAck)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
+			case sentAck.id != id || len(sentAck.data) != 0:
+				t.Errorf("unexpected ack: %+v", sentAck)
+				t.Fail()
+				return
 			}
 
 			// fwd
 			frame = <-remoteChan
 			if frame.typ() != frameTypeFwd {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			fwdID := lastID(b)
 			fwd, err := unmarshalFwd(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
-			case fwd.id != fwdID || !fwd.ack.equal(local) || !fwd.pkey.equal(remote) || !equalMessage(fwd.msg, msg):
-				t.Fatalf("unexpected fwd: %+v", fwd)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
+			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !equalMsg(fwd.msg, newMsg(msg)):
+				t.Errorf("unexpected fwd: %+v", fwd)
+				t.Fail()
+				return
 			}
 
 			pubsub.Publish(ctx, localStream, marshalAck(ack{
 				id: fwdID,
-			}, nil))
+			}))
 
-			if hasPendingAck(b, fwdID) {
-				t.Fatalf("unexpected pending ack: %d", fwdID)
+			if hasPendingReply(b, fwdID) {
+				t.Errorf("unexpected pending reply: %d", fwdID)
+				t.Fail()
+				return
 			}
 		}()
 
 		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
-			id:   id,
-			ack:  remote,
-			pkey: remote,
-			msg:  msg,
-		}, nil))
+			id:  id,
+			ack: remote[:],
+			msg: newMsg(msg),
+		}))
 
 	})
 
@@ -425,14 +480,16 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 	//                timeout
 	//                dispatch
 	t.Run("forward-timeout", func(t *testing.T) {
+		b.routing.register(remote[:])
+		defer b.routing.unregister(remote[:])
+
 		wg.Add(1)
 		defer wg.Wait()
 
 		id := b.nextID()
 		msg := Message{
 			Stream:       "mystream",
-			Time:         now,
-			PartitionKey: nil,
+			PartitionKey: remoteKey,
 			Data:         []byte("message data"),
 		}
 
@@ -446,51 +503,63 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 			// ack
 			frame := <-remoteChan
 			if frame.typ() != frameTypeAck {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			sentAck, err := unmarshalAck(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
 			case sentAck.id != id:
-				t.Fatalf("unexpected ack: %+v", sentAck)
+				t.Errorf("unexpected ack: %+v", sentAck)
+				t.Fail()
+				return
 			}
 
 			// fwd
 			frame = <-remoteChan
 			if frame.typ() != frameTypeFwd {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			fwdID := lastID(b)
 			fwd, err := unmarshalFwd(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
-			case fwd.id != fwdID || !fwd.ack.equal(local) || !fwd.pkey.equal(remote) || !equalMessage(fwd.msg, msg):
-				t.Fatalf("unexpected fwd: %+v", fwd)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
+			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !equalMsg(fwd.msg, newMsg(msg)):
+				t.Errorf("unexpected fwd: %+v", fwd)
+				t.Fail()
+				return
 			}
 
 			// dispatch
 			dispatchedMsg := <-incoming
 			switch {
 			case !equalMessage(dispatchedMsg, msg):
-				t.Fatalf("unexpected dispatched message: %+v", dispatchedMsg)
-			case containsKey(keys(b.routing.keys), remote):
-				t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+				t.Errorf("unexpected dispatched message: %+v", dispatchedMsg)
+				t.Fail()
+				return
+			case containsKey(keys(b.routing.keys), remote[:]):
+				t.Errorf("unexpected routing keys: %v", b.routing.keys)
+				t.Fail()
+				return
 			}
-
-			// add remote again for following tests
-			b.routing.register(keys(remote))
 		}()
 
 		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
-			id:   id,
-			ack:  remote,
-			pkey: remote,
-			msg:  msg,
-		}, nil))
+			id:  id,
+			ack: remote[:],
+			msg: newMsg(msg),
+		}))
 	})
 
 	// leave
@@ -501,38 +570,33 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			_ = <-cliqueChan // consume LEAV
+			<-cliqueChan // consume LEAV
 		}()
 
-		pubsub.Publish(ctx, cliqueName, marshalLeave(leave{node: remote}, nil))
+		pubsub.Publish(ctx, clique, marshalLeave(leave{node: remote[:]}))
 
-		if containsKey(keys(b.routing.keys), remote) {
+		if containsKey(keys(b.routing.keys), remote[:]) {
 			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
 		}
 	})
 }
 
 func TestBrokerRequest(t *testing.T) {
-	const cliqueName = "test-clique"
+	const clique = "test-clique"
 
 	ctx := context.Background()
-	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 
 	local := intKey(1)
-	localStream := nodeStream(cliqueName, local)
+	localStream := nodeStream(clique, local)
 
 	request := Message{
 		Stream:       "myrequests",
 		PartitionKey: []byte("partition one"),
-		Time:         now,
 		Data:         []byte("request data"),
 	}
 
 	response := Message{
-		Stream:       "myresponses",
-		Time:         now,
-		PartitionKey: []byte("partition two"),
-		Data:         []byte("response data"),
+		Data: []byte("response data"),
 	}
 
 	var requestHandler RequestHandler // set in the sub-tests
@@ -542,7 +606,7 @@ func TestBrokerRequest(t *testing.T) {
 		WithRequestHandler(request.Stream, func(ctx context.Context, msg Message) Message {
 			return requestHandler(ctx, msg)
 		}),
-		WithPartition(cliqueName, local.array()),
+		WithPartition(clique, newKey(local)),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -550,6 +614,9 @@ func TestBrokerRequest(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// --- msg -->
+	//              dispatch
+	// <-- ack ---
 	t.Run("dispatch", func(t *testing.T) {
 		requestHandler = func(_ context.Context, msg Message) Message {
 			if !equalMessage(msg, request) {
@@ -567,6 +634,11 @@ func TestBrokerRequest(t *testing.T) {
 		}
 	})
 
+	// --- msg -->
+	//               --- fwd -->
+	//               <-- ack ---
+	//                            dispatch
+	// <--------- ack ----------
 	t.Run("forward", func(t *testing.T) {
 		requestHandler = func(_ context.Context, msg Message) Message {
 			t.Fatal("unexpected request handler call")
@@ -579,7 +651,7 @@ func TestBrokerRequest(t *testing.T) {
 		b.routing.register(keys(remote))
 		defer b.routing.unregister(remote)
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -591,26 +663,31 @@ func TestBrokerRequest(t *testing.T) {
 
 			frame := <-remoteChan
 			if frame.typ() != frameTypeFwd {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			fwdID := lastID(b)
-			pkey := KeyFromBytes(request.PartitionKey)
 			fwd, err := unmarshalFwd(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
-			case fwd.id != fwdID || !fwd.ack.equal(local) || !fwd.pkey.equal(pkey[:]) || !equalMessage(fwd.msg, request):
-				t.Fatalf("unexpected fwd: %+v", fwd)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
+			case fwd.id != fwdID || !fwd.ack.equal(local) || !equalMsg(fwd.msg, newMsg(request)):
+				t.Errorf("unexpected fwd: %+v", fwd)
+				t.Fail()
+				return
 			}
 
 			pubsub.Publish(ctx, localStream, marshalAck(ack{
 				id: fwdID,
-			}, nil))
-			pubsub.Publish(ctx, localStream, marshalResp(resp{
-				id:  reqID,
-				msg: response,
-			}, nil))
+			}))
+			pubsub.Publish(ctx, localStream, marshalAck(ack{
+				id:   reqID,
+				data: response.Data,
+			}))
 		}()
 
 		msg, err := b.Request(ctx, request)
@@ -619,8 +696,8 @@ func TestBrokerRequest(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		case !equalMessage(msg, response):
 			t.Fatalf("unexpected response: %+v", msg)
-		case hasPendingAck(b, reqID):
-			t.Fatalf("unexpected pending ack: %d", reqID)
+		case hasPendingReply(b, reqID):
+			t.Fatalf("unexpected pending reply: %d", reqID)
 		}
 	})
 
@@ -640,7 +717,7 @@ func TestBrokerRequest(t *testing.T) {
 
 		b.routing.register(keys(remote))
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -652,25 +729,34 @@ func TestBrokerRequest(t *testing.T) {
 
 			frame := <-remoteChan
 			if frame.typ() != frameTypeFwd {
-				t.Fatalf("unexpected frame type: %s", frame.typ())
+				t.Errorf("unexpected frame type: %s", frame.typ())
+				t.Fail()
+				return
 			}
 
 			fwdID := lastID(b)
-			pkey := KeyFromBytes(request.PartitionKey)
 			fwd, err := unmarshalFwd(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
-			case fwd.id != fwdID || !fwd.ack.equal(local) || !fwd.pkey.equal(pkey[:]) || !equalMessage(fwd.msg, request):
-				t.Fatalf("unexpected fwd: %+v", fwd)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
+			case fwd.id != fwdID || !fwd.ack.equal(local) || !equalMsg(fwd.msg, newMsg(request)):
+				t.Errorf("unexpected fwd: %+v", fwd)
+				t.Fail()
+				return
 			}
 
 			msg := <-requestChan
 			switch {
 			case !equalMessage(msg, request):
-				t.Fatalf("unexpected request message: %+v", msg)
+				t.Errorf("unexpected request message: %+v", msg)
+				t.Fail()
+				return
 			case containsKey(keys(b.routing.keys), remote):
-				t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+				t.Errorf("unexpected routing keys: %v", b.routing.keys)
+				t.Fail()
+				return
 			}
 		}()
 
@@ -680,8 +766,8 @@ func TestBrokerRequest(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		case !equalMessage(msg, response):
 			t.Fatalf("unexpected response: %+v", msg)
-		case hasPendingAck(b, reqID):
-			t.Fatalf("unexpected pending ack: %d", reqID)
+		case hasPendingReply(b, reqID):
+			t.Fatalf("unexpected pending reply: %d", reqID)
 		}
 	})
 
@@ -714,16 +800,14 @@ func TestBrokerRequest(t *testing.T) {
 
 func TestBrokerClose(t *testing.T) {
 	const (
-		cliqueName    = "test-clique"
+		clique        = "test-clique"
 		messageStream = "my-message-stream"
 	)
 
 	ctx := context.Background()
-	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 	errch := make(chan error, 1)
 	msg := Message{
 		Stream:       messageStream,
-		Time:         now,
 		PartitionKey: []byte("partition one"),
 		Data:         []byte("message data"),
 	}
@@ -732,14 +816,14 @@ func TestBrokerClose(t *testing.T) {
 
 	local := intKey(1)
 	remote := KeyFromBytes(msg.PartitionKey)
-	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote[:]))
+	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote[:]))
 	defer remoteSub.Unsubscribe(ctx)
 
 	b, err := NewBroker(ctx, pubsub,
 		WithMessageHandler(messageStream, func(_ context.Context, msg Message) {
 			t.Fatal("unexpected message handler call")
 		}),
-		WithPartition(cliqueName, local.array()),
+		WithPartition(clique, newKey(local)),
 		disableAckTimeouts(),
 		disableStabilization(),
 		WithErrorHandler(func(err error) { errch <- err }),
@@ -767,7 +851,9 @@ func TestBrokerClose(t *testing.T) {
 
 		<-remoteChan // wait for fwd frame
 		if err := b.Close(); err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Errorf("unexpected error: %v", err)
+			t.Fail()
+			return
 		}
 	}()
 
@@ -778,13 +864,12 @@ func TestBrokerClose(t *testing.T) {
 
 func TestBrokerShutdown(t *testing.T) {
 	const (
-		cliqueName    = "test-clique"
+		clique        = "test-clique"
 		messageStream = "my-message-stream"
 		requestStream = "my-request-stream"
 	)
 
 	ctx := context.Background()
-	now := time.Date(1988, time.September, 26, 13, 14, 15, 0, time.UTC)
 	local := intKey(1)
 	pubsub := newPubsubRecorder()
 
@@ -802,7 +887,7 @@ func TestBrokerShutdown(t *testing.T) {
 			<-finishedMessage
 			return msg
 		}),
-		WithPartition(cliqueName, local.array()),
+		WithPartition(clique, newKey(local)),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -820,7 +905,6 @@ func TestBrokerShutdown(t *testing.T) {
 		var codec DefaultCodec
 		pubsub.Publish(ctx, messageStream, codec.EncodeMessage(Message{
 			Stream: messageStream,
-			Time:   now,
 			Data:   []byte("message data"),
 		}))
 	}()
@@ -829,15 +913,12 @@ func TestBrokerShutdown(t *testing.T) {
 	go func() {
 		defer wg.Done()
 
-		pubsub.Publish(ctx, requestStream, marshalReq(req{
-			id:    7,
-			reply: b.routing.local,
-			msg: Message{
-				Stream: requestStream,
-				Time:   now,
-				Data:   []byte("request data"),
-			},
-		}, nil))
+		pubsub.Publish(ctx, requestStream, marshalMsg(msg{
+			id:     7,
+			reply:  b.routing.local,
+			stream: []byte(requestStream),
+			data:   []byte("request data"),
+		}))
 	}()
 
 	wg.Add(1)
@@ -847,7 +928,9 @@ func TestBrokerShutdown(t *testing.T) {
 		<-receivedMessage
 		<-receivedRequest
 		if err := b.Shutdown(ctx); err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Errorf("unexpected error: %v", err)
+			t.Fail()
+			return
 		}
 	}()
 
@@ -861,38 +944,46 @@ func TestBrokerShutdown(t *testing.T) {
 }
 
 func TestBrokerStabilization(t *testing.T) {
-	const cliqueName = "test-clique"
+	const clique = "test-clique"
 
 	ctx := context.Background()
 
 	local := intKey(1)
-	localStream := nodeStream(cliqueName, local)
+	localStream := nodeStream(clique, local)
 
 	remote := intKey(11)
 
 	pubsub := newPubsubRecorder()
-	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(cliqueName, remote))
+	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
 	defer remoteSub.Unsubscribe(ctx)
 
 	newBroker := func(ackTimeout time.Duration) (*Broker, error) {
 		b := &Broker{
+			clique:     clique,
 			ackTimeout: ackTimeout,
 			routing: newRoutingTable(options{
 				nodeKey:       local,
 				stabilization: Stabilization{Stabilizers: 1},
 			}),
-			pubsub: newPubSub(pubsub, options{
-				cliqueName: cliqueName,
-				nodeKey:    local,
-			}),
-			leaving:     make(chan struct{}),
-			pendingAcks: make(map[uint64]pendingAck),
+			pubsub:         newPubSub(pubsub, options{}),
+			leaving:        make(chan struct{}),
+			pendingReplies: make(map[uint64]pendingReply),
 		}
 
 		b.routing.register(keys(remote))
 
-		err := b.pubsub.subscribeClique(ctx, b.processCliqueProtocol)
-		return b, err
+		// subscribe clique
+		err := b.pubsub.subscribe(ctx, nodeStream(clique, local), "", b.processCliqueProtocol)
+		if err != nil {
+			return nil, err
+		}
+
+		err = b.pubsub.subscribe(ctx, clique, "", b.processCliqueProtocol)
+		if err != nil {
+			return nil, err
+		}
+
+		return b, nil
 	}
 
 	t.Run("ack", func(t *testing.T) {
@@ -911,7 +1002,9 @@ func TestBrokerStabilization(t *testing.T) {
 			frame := <-remoteChan
 			close(b.leaving)
 			if frame.typ() != frameTypePing {
-				t.Fatalf("unexpected frame type for %v: %s", remote, frame.typ())
+				t.Errorf("unexpected frame type for %v: %s", remote, frame.typ())
+				t.Fail()
+				return
 			}
 
 			const pingID = 1
@@ -919,21 +1012,29 @@ func TestBrokerStabilization(t *testing.T) {
 			ping, err := unmarshalPing(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
 			case ping.id != pingID || !ping.sender.equal(local):
-				t.Fatalf("unexpected ping: %+v", ping)
+				t.Errorf("unexpected ping: %+v", ping)
+				t.Fail()
+				return
 			}
 
 			pubsub.Publish(ctx, localStream, marshalInfo(info{
 				id:        pingID,
 				neighbors: keys(remote),
-			}, nil))
+			}))
 
 			switch {
-			case hasPendingAck(b, pingID):
-				t.Fatalf("unexpected pending ack: %d", pingID)
+			case hasPendingReply(b, pingID):
+				t.Errorf("unexpected pending reply: %d", pingID)
+				t.Fail()
+				return
 			case !containsKey(keys(b.routing.keys), remote):
-				t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+				t.Errorf("unexpected routing keys: %v", b.routing.keys)
+				t.Fail()
+				return
 			}
 		}()
 
@@ -958,15 +1059,21 @@ func TestBrokerStabilization(t *testing.T) {
 			frame := <-remoteChan
 			close(b.leaving)
 			if frame.typ() != frameTypePing {
-				t.Fatalf("unexpected frame type for %v: %s", remote, frame.typ())
+				t.Errorf("unexpected frame type for %v: %s", remote, frame.typ())
+				t.Fail()
+				return
 			}
 
 			ping, err := unmarshalPing(frame)
 			switch {
 			case err != nil:
-				t.Fatalf("unexpected error: %v", err)
+				t.Errorf("unexpected error: %v", err)
+				t.Fail()
+				return
 			case ping.id != pingID || !ping.sender.equal(local):
-				t.Fatalf("unexpected ping: %+v", ping)
+				t.Errorf("unexpected ping: %+v", ping)
+				t.Fail()
+				return
 			}
 
 		}()
@@ -974,8 +1081,8 @@ func TestBrokerStabilization(t *testing.T) {
 		b.wg.Wait()
 
 		switch {
-		case hasPendingAck(b, pingID):
-			t.Fatalf("unexpected pending ack: %d", pingID)
+		case hasPendingReply(b, pingID):
+			t.Fatalf("unexpected pending reply: %d", pingID)
 		case containsKey(keys(b.routing.keys), remote):
 			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
 		}
@@ -986,10 +1093,10 @@ func lastID(b *Broker) uint64 {
 	return atomic.LoadUint64(&b.id)
 }
 
-func hasPendingAck(b *Broker, id uint64) bool {
-	b.pendingAckMtx.Lock()
-	_, has := b.pendingAcks[id]
-	b.pendingAckMtx.Unlock()
+func hasPendingReply(b *Broker, id uint64) bool {
+	b.pendingRepliesMtx.Lock()
+	_, has := b.pendingReplies[id]
+	b.pendingRepliesMtx.Unlock()
 	return has
 }
 
