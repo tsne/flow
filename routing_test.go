@@ -4,16 +4,16 @@ import "testing"
 
 func TestNewRoutingTable(t *testing.T) {
 	opts := options{
-		nodeKey: intKey(7),
+		nodeKey: 7,
 		stabilization: Stabilization{
-			Successors:  7,
-			Stabilizers: 8,
+			Successors:  13,
+			Stabilizers: 14,
 		},
 	}
 	r := newRoutingTable(opts)
 
 	switch {
-	case !r.local.equal(opts.nodeKey):
+	case r.local != opts.nodeKey:
 		t.Fatalf("unexpected local key: %s", r.local)
 	case r.successorCount != opts.stabilization.Successors:
 		t.Fatalf("unexpected successor count: %d", r.successorCount)
@@ -23,229 +23,221 @@ func TestNewRoutingTable(t *testing.T) {
 }
 
 func TestRoutingTableRegister(t *testing.T) {
-	keybuf := intKeys(3, 5, 7, 9)
-	key3 := keybuf.at(0)
-	key5 := keybuf.at(1)
-	key7 := keybuf.at(2)
-	key9 := keybuf.at(3)
+	r := routingTable{local: 7}
 
-	r := routingTable{local: key7}
-
-	r.register(keys(key7))
+	r.registerKey(7)
 	switch {
-	case r.keys.length() != 0:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
+	case len(r.keys) != 0:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
 	}
 
-	r.register(keys(key5))
+	r.registerKey(5)
 	switch {
-	case r.keys.length() != 1:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
-	case !r.keys.at(0).equal(key5):
-		t.Fatalf("unexpected keys: %v", printableKeys(r.keys))
+	case len(r.keys) != 1:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
+	case r.keys[0] != 5:
+		t.Fatalf("unexpected keys: %v", r.keys)
 	case r.succIdx != 0:
 		t.Fatalf("unexpected successor index: %d", r.succIdx)
 	}
 
-	r.register(keys(key3))
+	r.registerKey(3)
 	switch {
-	case r.keys.length() != 2:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
-	case !r.keys.at(0).equal(key3) || !r.keys.at(1).equal(key5):
-		t.Fatalf("unexpected keys: %v", printableKeys(r.keys))
+	case len(r.keys) != 2:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
+	case r.keys[0] != 3 || r.keys[1] != 5:
+		t.Fatalf("unexpected keys: %v", r.keys)
 	case r.succIdx != 0:
 		t.Fatalf("unexpected successor index: %d", r.succIdx)
 	}
 
-	r.register(keys(key9))
+	r.registerKey(9)
 	switch {
-	case r.keys.length() != 3:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
-	case !r.keys.at(0).equal(key3) || !r.keys.at(1).equal(key5) || !r.keys.at(2).equal(key9):
-		t.Fatalf("unexpected keys: %v", printableKeys(r.keys))
+	case len(r.keys) != 3:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
+	case r.keys[0] != 3 || r.keys[1] != 5 || r.keys[2] != 9:
+		t.Fatalf("unexpected keys: %v", r.keys)
 	case r.succIdx != 2:
 		t.Fatalf("unexpected successor index: %d", r.succIdx)
 	}
 
-	r.register(keys(key5))
+	r.registerKey(5)
 	switch {
-	case r.keys.length() != 3:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
-	case !r.keys.at(0).equal(key3) || !r.keys.at(1).equal(key5) || !r.keys.at(2).equal(key9):
-		t.Fatalf("unexpected keys: %v", printableKeys(r.keys))
+	case len(r.keys) != 3:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
+	case r.keys[0] != 3 || r.keys[1] != 5 || r.keys[2] != 9:
+		t.Fatalf("unexpected keys: %v", r.keys)
 	case r.succIdx != 2:
 		t.Fatalf("unexpected successor index: %d", r.succIdx)
 	}
 }
 
 func TestRoutingTableUnregister(t *testing.T) {
-	keybuf := intKeys(3, 5, 7, 9)
-	key3 := keybuf.at(0)
-	key5 := keybuf.at(1)
-	key7 := keybuf.at(2)
-	key9 := keybuf.at(3)
+	r := routingTable{local: 7}
+	r.registerKeys(keys{
+		0, 0, 0, 0, 0, 0, 0, 3,
+		0, 0, 0, 0, 0, 0, 0, 5,
+		0, 0, 0, 0, 0, 0, 0, 7,
+		0, 0, 0, 0, 0, 0, 0, 9,
+	})
 
-	r := routingTable{local: key7}
-	r.register(keybuf)
-
-	r.unregister(key7)
+	r.unregister(7)
 	switch {
-	case r.keys.length() != 3:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
-	case !r.keys.at(0).equal(key3) || !r.keys.at(1).equal(key5) || !r.keys.at(2).equal(key9):
-		t.Fatalf("unexpected keys: %v", printableKeys(r.keys))
+	case len(r.keys) != 3:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
+	case r.keys[0] != 3 || r.keys[1] != 5 || r.keys[2] != 9:
+		t.Fatalf("unexpected keys: %v", r.keys)
 	case r.succIdx != 2:
 		t.Fatalf("unexpected successor index: %d", r.succIdx)
 	}
 
-	r.unregister(key5)
+	r.unregister(5)
 	switch {
-	case r.keys.length() != 2:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
-	case !r.keys.at(0).equal(key3) || !r.keys.at(1).equal(key9):
-		t.Fatalf("unexpected keys: %v", printableKeys(r.keys))
+	case len(r.keys) != 2:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
+	case r.keys[0] != 3 || r.keys[1] != 9:
+		t.Fatalf("unexpected keys: %v", r.keys)
 	case r.succIdx != 1:
 		t.Fatalf("unexpected successor index: %d", r.succIdx)
 	}
 
-	r.unregister(key9)
+	r.unregister(9)
 	switch {
-	case r.keys.length() != 1:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
-	case !r.keys.at(0).equal(key3):
-		t.Fatalf("unexpected keys: %v", printableKeys(r.keys))
+	case len(r.keys) != 1:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
+	case r.keys[0] != 3:
+		t.Fatalf("unexpected keys: %v", r.keys)
 	case r.succIdx != 0:
 		t.Fatalf("unexpected successor index: %d", r.succIdx)
 	}
 
-	r.unregister(key3)
-	if r.keys.length() != 0 {
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
+	r.unregister(3)
+	if len(r.keys) != 0 {
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
 	}
 }
 
 func TestRoutingTableSuspect(t *testing.T) {
-	keybuf := intKeys(5, 7)
-	key5 := keybuf.at(0)
-	key7 := keybuf.at(1)
+	r := routingTable{local: 7}
+	r.registerKeys(keys{
+		0, 0, 0, 0, 0, 0, 0, 5,
+		0, 0, 0, 0, 0, 0, 0, 7,
+	})
 
-	r := routingTable{local: key7}
-	r.register(keybuf)
-
-	r.suspect(key7)
+	r.suspect(7)
 	switch {
-	case r.keys.length() != 1:
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
-	case !r.keys.at(0).equal(key5):
-		t.Fatalf("unexpected keys: %v", printableKeys(r.keys))
+	case len(r.keys) != 1:
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
+	case r.keys[0] != 5:
+		t.Fatalf("unexpected keys: %v", r.keys)
 	case r.succIdx != 0:
 		t.Fatalf("unexpected successor index: %d", r.succIdx)
 	}
 
-	r.suspect(key5)
-	if r.keys.length() != 0 {
-		t.Fatalf("unexpected number of keys: %d", r.keys.length())
+	r.suspect(5)
+	if len(r.keys) != 0 {
+		t.Fatalf("unexpected number of keys: %d", len(r.keys))
 	}
 }
 
 func TestRoutingTableNeighbors(t *testing.T) {
-	keybuf := intKeys(1, 3, 5, 7, 9, 11, 13)
-	key3 := keybuf.at(1)
-	key5 := keybuf.at(2)
-	key7 := keybuf.at(3)
-	key9 := keybuf.at(4)
-	key11 := keybuf.at(5)
-
 	r := routingTable{
-		local:          key7,
+		local:          7,
 		successorCount: 2,
 	}
-	neighbors := r.neighbors(nil)
+
+	neighbors := r.neighbors()
 	switch {
 	case neighbors.length() != 1:
 		t.Fatalf("unexpected number of neighbors: %d", neighbors.length())
-	case !neighbors.at(0).equal(r.local):
+	case neighbors.at(0) != r.local:
 		t.Fatalf("unexpected neighbors: %v", printableKeys(neighbors))
 	}
 
-	r.register(keys(key3))
-	neighbors = r.neighbors(neighbors)
+	r.registerKey(3)
+	neighbors = r.neighbors()
 	switch {
 	case neighbors.length() != 2:
 		t.Fatalf("unexpected number of neighbors: %d", neighbors.length())
-	case !neighbors.at(0).equal(key3) || !neighbors.at(1).equal(r.local):
+	case neighbors.at(0) != 3 || neighbors.at(1) != r.local:
 		t.Fatalf("unexpected neighbors: %v", printableKeys(neighbors))
 	}
 
-	r.register(keybuf)
-	neighbors = r.neighbors(neighbors)
+	r.registerKeys(keys{
+		0, 0, 0, 0, 0, 0, 0, 1,
+		0, 0, 0, 0, 0, 0, 0, 3,
+		0, 0, 0, 0, 0, 0, 0, 5,
+		0, 0, 0, 0, 0, 0, 0, 7,
+		0, 0, 0, 0, 0, 0, 0, 9,
+		0, 0, 0, 0, 0, 0, 0, 11,
+		0, 0, 0, 0, 0, 0, 0, 13,
+	})
+	neighbors = r.neighbors()
 	switch {
 	case neighbors.length() != 4:
 		t.Fatalf("unexpected number of neighbors: %d", neighbors.length())
-	case !neighbors.at(0).equal(key5) || !neighbors.at(1).equal(key9) || !neighbors.at(2).equal(key11) || !neighbors.at(3).equal(r.local):
+	case neighbors.at(0) != 5 || neighbors.at(1) != 9 || neighbors.at(2) != 11 || neighbors.at(3) != r.local:
 		t.Fatalf("unexpected neighbors: %v", printableKeys(neighbors))
 	}
 }
 
 func TestRoutingTableStabilizers(t *testing.T) {
-	keys := intKeys(1, 3, 5, 9)
 	r := routingTable{
-		keys:            ring(keys.at(0)),
+		keys:            keyRing{1},
 		stabilizerCount: 5,
 	}
 
-	stabilizers := r.stabilizers(nil)
+	stabilizers := make([]Key, 3)
+	n := r.stabilizers(stabilizers)
 	switch {
-	case stabilizers.length() != 1:
-		t.Fatalf("unexpected number of stabilizers: %d", stabilizers.length())
-	case !stabilizers.at(0).equal(keys.at(0)):
-		t.Fatalf("unexpected stabilizers: %v", printableKeys(stabilizers))
+	case n != 1:
+		t.Fatalf("unexpected number of stabilizers: %d", n)
+	case stabilizers[0] != 1:
+		t.Fatalf("unexpected stabilizers: %v", stabilizers)
 	}
 
 	r = routingTable{
-		keys:            ring(keys),
+		keys:            keyRing{1, 3, 5, 9},
 		stabilizerCount: 2,
 	}
 
-	stabilizers = r.stabilizers(stabilizers)
+	n = r.stabilizers(stabilizers)
 	switch {
-	case stabilizers.length() != 3:
-		t.Fatalf("unexpected number of stabilizers: %d", stabilizers.length())
-	case !stabilizers.at(0).equal(r.keys.at(r.succIdx)) || !stabilizers.at(1).equal(keys.at(0)) || !stabilizers.at(2).equal(keys.at(1)):
-		t.Fatalf("unexpected stabilizers: %v", printableKeys(stabilizers))
+	case n != 3:
+		t.Fatalf("unexpected number of stabilizers: %d", n)
+	case stabilizers[0] != r.keys[r.succIdx] || stabilizers[1] != 1 || stabilizers[2] != 3:
+		t.Fatalf("unexpected stabilizers: %v", stabilizers)
 	case r.stabIdx != 2:
 		t.Fatalf("unexpected stabilizer index: %d", r.stabIdx)
 	}
 
-	stabilizers = r.stabilizers(stabilizers)
+	n = r.stabilizers(stabilizers)
 	switch {
-	case stabilizers.length() != 3:
-		t.Fatalf("unexpected number of stabilizers: %d", stabilizers.length())
-	case !stabilizers.at(0).equal(r.keys.at(r.succIdx)) || !stabilizers.at(1).equal(keys.at(2)) || !stabilizers.at(2).equal(keys.at(3)):
-		t.Fatalf("unexpected stabilizers: %v", printableKeys(stabilizers))
+	case n != 3:
+		t.Fatalf("unexpected number of stabilizers: %d", n)
+	case stabilizers[0] != r.keys[r.succIdx] || stabilizers[1] != 5 || stabilizers[2] != 9:
+		t.Fatalf("unexpected stabilizers: %v", stabilizers)
 	case r.stabIdx != 4:
 		t.Fatalf("unexpected stabilizer index: %d", r.stabIdx)
 	}
 }
 
 func TestRoutingTableSuccessor(t *testing.T) {
-	key5 := intKey(5)
-
 	r := routingTable{}
-	succ := r.successor(key5, nil)
-	if len(succ) != 0 {
-		t.Fatalf("unexpected successor: %s", printableKey(succ))
+	succ := r.successor(5)
+	if succ != r.local {
+		t.Fatalf("unexpected successor: %s", succ)
 	}
 
 	r = routingTable{
-		local: key5,
-		keys:  ring(intKeys(1, 3, 7, 9)),
+		local: 5,
+		keys:  keyRing{1, 3, 7, 9},
 	}
-	succ = r.successor(r.keys.at(0), succ)
+	succ = r.successor(r.keys[0])
 	switch {
-	case len(succ) == 0:
+	case succ == r.local:
 		t.Fatal("non-local successor expected")
-	case !succ.equal(r.keys.at(0)):
-		t.Fatalf("unexpected successor: %s", printableKey(succ))
+	case succ != 1:
+		t.Fatalf("unexpected successor: %s", succ)
 	}
 }

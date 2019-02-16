@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"sync/atomic"
@@ -41,7 +42,7 @@ func TestBrokerSubscription(t *testing.T) {
 	}
 
 	local := KeyFromBytes(msg.PartitionKey)
-	localStream := nodeStream(clique, local[:])
+	localStream := nodeStream(clique, local)
 
 	messageChan := make(chan Message, 1)
 	pubsub := newPubsubRecorder()
@@ -49,6 +50,7 @@ func TestBrokerSubscription(t *testing.T) {
 		WithMessageHandler(msg.Stream, func(_ context.Context, msg Message) { messageChan <- msg }),
 		WithPartition(clique, local),
 		disableAckTimeouts(),
+		disableReqTimeouts(),
 		disableStabilization(),
 	)
 	if err != nil {
@@ -74,10 +76,10 @@ func TestBrokerSubscription(t *testing.T) {
 
 		remote := KeyFromBytes(msg.PartitionKey)
 
-		b.routing.register(keys(remote[:]))
-		defer b.routing.unregister(remote[:])
+		b.routing.registerKey(remote)
+		defer b.routing.unregister(remote)
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote[:]))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -101,7 +103,7 @@ func TestBrokerSubscription(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !equalMsg(fwd.msg, newMsg(msg)):
+			case fwd.id != fwdID || fwd.ack != local || !equalMsg(fwd.msg, newMsg(msg)):
 				t.Errorf("unexpected fwd: %+v", fwd)
 				t.Fail()
 				return
@@ -122,7 +124,6 @@ func TestBrokerSubscription(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-
 	})
 
 	t.Run("forward-timeout", func(t *testing.T) {
@@ -136,10 +137,10 @@ func TestBrokerSubscription(t *testing.T) {
 
 		remote := KeyFromBytes(msg.PartitionKey)
 
-		b.routing.register(keys(remote[:]))
-		defer b.routing.unregister(remote[:])
+		b.routing.registerKey(remote)
+		defer b.routing.unregister(remote)
 
-		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote[:]))
+		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
 		defer remoteSub.Unsubscribe(ctx)
 
 		var wg sync.WaitGroup
@@ -163,7 +164,7 @@ func TestBrokerSubscription(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !equalMsg(fwd.msg, newMsg(msg)):
+			case fwd.id != fwdID || fwd.ack != local || !equalMsg(fwd.msg, newMsg(msg)):
 				t.Errorf("unexpected fwd: %+v", fwd)
 				t.Fail()
 				return
@@ -180,7 +181,7 @@ func TestBrokerSubscription(t *testing.T) {
 				t.Errorf("unexpected pending reply: %d", fwdID)
 				t.Fail()
 				return
-			case containsKey(keys(b.routing.keys), remote[:]):
+			case containsKey(b.routing.keys, remote):
 				t.Errorf("unexpected routing keys: %v", b.routing.keys)
 				t.Fail()
 				return
@@ -201,11 +202,11 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 
 	localKey := []byte("local")
 	local := KeyFromBytes(localKey)
-	localStream := nodeStream(clique, local[:])
+	localStream := nodeStream(clique, local)
 
 	remoteKey := []byte("remote")
 	remote := KeyFromBytes(remoteKey)
-	remoteStream := nodeStream(clique, remote[:])
+	remoteStream := nodeStream(clique, remote)
 
 	pubsub := newPubsubRecorder()
 	cliqueChan, cliqueSub := pubsub.SubscribeChan(ctx, clique)
@@ -233,15 +234,19 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 			t.Fail()
 			return
-		case !join.sender.equal(local[:]):
+		case join.sender != local:
 			t.Errorf("unexpected join: %+v", join)
 			t.Fail()
 			return
 		}
 
 		pubsub.Publish(ctx, localStream, marshalInfo(info{
-			id:        13,
-			neighbors: intKeys(101, 102, 103),
+			id: 13,
+			neighbors: keys{
+				0, 0, 0, 0, 0, 0, 1, 1,
+				0, 0, 0, 0, 0, 0, 1, 2,
+				0, 0, 0, 0, 0, 0, 1, 3,
+			},
 		}))
 	}()
 
@@ -258,15 +263,15 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 	}
 	wg.Wait()
 
-	if !equalKeys(keys(b.routing.keys), intKeys(101, 102, 103)) {
+	if len(b.routing.keys) != 3 || !containsKey(b.routing.keys, 0x101) || !containsKey(b.routing.keys, 0x102) || !containsKey(b.routing.keys, 0x103) {
 		t.Fatalf("unexpected routing keys: %v", b.routing.keys)
 	}
 
-	b.routing.unregister(intKey(101))
-	b.routing.unregister(intKey(102))
-	b.routing.unregister(intKey(103))
+	b.routing.unregister(0x101)
+	b.routing.unregister(0x102)
+	b.routing.unregister(0x103)
 
-	if b.routing.keys.length() != 0 {
+	if len(b.routing.keys) != 0 {
 		t.Fatalf("unexpected routing keys: %v", b.routing.keys)
 	}
 
@@ -293,17 +298,17 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case info.id != 0 || !equalKeys(info.neighbors, keys(b.routing.local)):
+			case info.id != 0 || info.neighbors.length() != 1 || info.neighbors.at(0) != b.routing.local:
 				t.Errorf("unexpected info: %+v", info)
 				t.Fail()
 				return
 			}
 		}()
 
-		pubsub.Publish(ctx, clique, marshalJoin(join{sender: remote[:]}))
+		pubsub.Publish(ctx, clique, marshalJoin(join{sender: remote}))
 
-		if !containsKey(keys(b.routing.keys), remote[:]) {
-			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+		if !containsKey(b.routing.keys, remote) {
+			t.Fatalf("unexpected routing keys: %+v", b.routing.keys)
 		}
 	})
 
@@ -313,8 +318,8 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 		wg.Add(1)
 		defer wg.Wait()
 
-		id := b.nextID()
-		expectedNeighbors := b.routing.neighbors(nil)
+		id := nextID(b)
+		expectedNeighbors := b.routing.neighbors()
 
 		go func() {
 			defer wg.Done()
@@ -332,7 +337,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case info.id != id || !equalKeys(info.neighbors, expectedNeighbors):
+			case info.id != id || !bytes.Equal(info.neighbors, expectedNeighbors):
 				t.Errorf("unexpected info: %+v", info)
 				t.Fail()
 				return
@@ -341,7 +346,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 
 		pubsub.Publish(ctx, localStream, marshalPing(ping{
 			id:     id,
-			sender: remote[:],
+			sender: remote,
 		}, nil))
 	})
 
@@ -352,7 +357,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 		wg.Add(1)
 		defer wg.Wait()
 
-		id := b.nextID()
+		id := nextID(b)
 		msg := Message{
 			Stream:       stream,
 			PartitionKey: nil,
@@ -384,7 +389,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 
 		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
 			id:  id,
-			ack: remote[:],
+			ack: remote,
 			msg: newMsg(msg),
 		}))
 
@@ -398,13 +403,13 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 	//              --- fwd -->
 	//              <-- ack ---
 	t.Run("forward", func(t *testing.T) {
-		b.routing.register(remote[:])
-		defer b.routing.unregister(remote[:])
+		b.routing.registerKey(remote)
+		defer b.routing.unregister(remote)
 
 		wg.Add(1)
 		defer wg.Wait()
 
-		id := b.nextID()
+		id := nextID(b)
 		msg := Message{
 			Stream:       stream,
 			PartitionKey: remoteKey,
@@ -449,7 +454,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !equalMsg(fwd.msg, newMsg(msg)):
+			case fwd.id != fwdID || fwd.ack != local || !equalMsg(fwd.msg, newMsg(msg)):
 				t.Errorf("unexpected fwd: %+v", fwd)
 				t.Fail()
 				return
@@ -468,7 +473,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 
 		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
 			id:  id,
-			ack: remote[:],
+			ack: remote,
 			msg: newMsg(msg),
 		}))
 
@@ -480,13 +485,13 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 	//                timeout
 	//                dispatch
 	t.Run("forward-timeout", func(t *testing.T) {
-		b.routing.register(remote[:])
-		defer b.routing.unregister(remote[:])
+		b.routing.registerKey(remote)
+		defer b.routing.unregister(remote)
 
 		wg.Add(1)
 		defer wg.Wait()
 
-		id := b.nextID()
+		id := nextID(b)
 		msg := Message{
 			Stream:       "mystream",
 			PartitionKey: remoteKey,
@@ -535,7 +540,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case fwd.id != fwdID || !fwd.ack.equal(local[:]) || !equalMsg(fwd.msg, newMsg(msg)):
+			case fwd.id != fwdID || fwd.ack != local || !equalMsg(fwd.msg, newMsg(msg)):
 				t.Errorf("unexpected fwd: %+v", fwd)
 				t.Fail()
 				return
@@ -548,7 +553,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 				t.Errorf("unexpected dispatched message: %+v", dispatchedMsg)
 				t.Fail()
 				return
-			case containsKey(keys(b.routing.keys), remote[:]):
+			case containsKey(b.routing.keys, remote):
 				t.Errorf("unexpected routing keys: %v", b.routing.keys)
 				t.Fail()
 				return
@@ -557,7 +562,7 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 
 		pubsub.Publish(ctx, localStream, marshalFwd(fwd{
 			id:  id,
-			ack: remote[:],
+			ack: remote,
 			msg: newMsg(msg),
 		}))
 	})
@@ -573,10 +578,10 @@ func TestBrokerCliqueProtocol(t *testing.T) {
 			<-cliqueChan // consume LEAV
 		}()
 
-		pubsub.Publish(ctx, clique, marshalLeave(leave{node: remote[:]}))
+		pubsub.Publish(ctx, clique, marshalLeave(leave{node: remote}))
 
-		if containsKey(keys(b.routing.keys), remote[:]) {
-			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+		if containsKey(b.routing.keys, remote) {
+			t.Fatalf("unexpected routing keys: %+v", b.routing.keys)
 		}
 	})
 }
@@ -586,7 +591,7 @@ func TestBrokerRequest(t *testing.T) {
 
 	ctx := context.Background()
 
-	local := intKey(1)
+	local := Key(1)
 	localStream := nodeStream(clique, local)
 
 	request := Message{
@@ -606,8 +611,9 @@ func TestBrokerRequest(t *testing.T) {
 		WithRequestHandler(request.Stream, func(ctx context.Context, msg Message) Message {
 			return requestHandler(ctx, msg)
 		}),
-		WithPartition(clique, newKey(local)),
+		WithPartition(clique, local),
 		disableAckTimeouts(),
+		disableReqTimeouts(),
 		disableStabilization(),
 	)
 	if err != nil {
@@ -645,10 +651,10 @@ func TestBrokerRequest(t *testing.T) {
 			return msg
 		}
 
-		remote := intKey(0)
+		remote := Key(0)
 		reqID := lastID(b) + 1
 
-		b.routing.register(keys(remote))
+		b.routing.registerKey(remote)
 		defer b.routing.unregister(remote)
 
 		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
@@ -675,7 +681,7 @@ func TestBrokerRequest(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case fwd.id != fwdID || !fwd.ack.equal(local) || !equalMsg(fwd.msg, newMsg(request)):
+			case fwd.id != fwdID || fwd.ack != local || !equalMsg(fwd.msg, newMsg(request)):
 				t.Errorf("unexpected fwd: %+v", fwd)
 				t.Fail()
 				return
@@ -701,6 +707,11 @@ func TestBrokerRequest(t *testing.T) {
 		}
 	})
 
+	// --- msg -->
+	//                       --- fwd -->
+	//                         timeout
+	//              dispatch
+	// <-- ack ---
 	t.Run("forward-timeout", func(t *testing.T) {
 		ackTimeout := b.ackTimeout
 		b.ackTimeout = time.Millisecond
@@ -712,10 +723,10 @@ func TestBrokerRequest(t *testing.T) {
 			return response
 		}
 
-		remote := intKey(0)
+		remote := Key(0)
 		reqID := lastID(b) + 1
 
-		b.routing.register(keys(remote))
+		b.routing.registerKey(remote)
 
 		remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
 		defer remoteSub.Unsubscribe(ctx)
@@ -741,7 +752,7 @@ func TestBrokerRequest(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case fwd.id != fwdID || !fwd.ack.equal(local) || !equalMsg(fwd.msg, newMsg(request)):
+			case fwd.id != fwdID || fwd.ack != local || !equalMsg(fwd.msg, newMsg(request)):
 				t.Errorf("unexpected fwd: %+v", fwd)
 				t.Fail()
 				return
@@ -753,8 +764,8 @@ func TestBrokerRequest(t *testing.T) {
 				t.Errorf("unexpected request message: %+v", msg)
 				t.Fail()
 				return
-			case containsKey(keys(b.routing.keys), remote):
-				t.Errorf("unexpected routing keys: %v", b.routing.keys)
+			case containsKey(b.routing.keys, remote):
+				t.Errorf("unexpected routing keys: %+v", b.routing.keys)
 				t.Fail()
 				return
 			}
@@ -771,7 +782,23 @@ func TestBrokerRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("deadline", func(t *testing.T) {
+	// --- msg -->
+	//   timeout
+	t.Run("timeout", func(t *testing.T) {
+		reqTimeout := b.reqTimeout
+		b.reqTimeout = time.Millisecond
+		defer func() { b.reqTimeout = reqTimeout }()
+
+		req := request
+		req.Stream = "non-existing-stream"
+
+		_, err := b.Request(ctx, req)
+		if err != ErrTimeout {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("deadline-exceeded", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(ctx, time.Millisecond)
 		defer cancel()
 
@@ -780,19 +807,6 @@ func TestBrokerRequest(t *testing.T) {
 
 		_, err := b.Request(ctx, req)
 		if err != ctx.Err() {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("timeout", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(ctx, time.Millisecond)
-		defer cancel()
-
-		req := request
-		req.Stream = "non-existing-stream"
-
-		_, err := b.Request(ctx, req)
-		if err != context.DeadlineExceeded {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -814,16 +828,16 @@ func TestBrokerClose(t *testing.T) {
 
 	pubsub := newPubsubRecorder()
 
-	local := intKey(1)
+	local := Key(1)
 	remote := KeyFromBytes(msg.PartitionKey)
-	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote[:]))
+	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
 	defer remoteSub.Unsubscribe(ctx)
 
 	b, err := NewBroker(ctx, pubsub,
 		WithMessageHandler(messageStream, func(_ context.Context, msg Message) {
 			t.Fatal("unexpected message handler call")
 		}),
-		WithPartition(clique, newKey(local)),
+		WithPartition(clique, local),
 		disableAckTimeouts(),
 		disableStabilization(),
 		WithErrorHandler(func(err error) { errch <- err }),
@@ -832,7 +846,7 @@ func TestBrokerClose(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	b.routing.register(remote[:])
+	b.routing.registerKey(remote)
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -870,7 +884,7 @@ func TestBrokerShutdown(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	local := intKey(1)
+	local := Key(1)
 	pubsub := newPubsubRecorder()
 
 	receivedMessage := make(chan struct{})
@@ -887,7 +901,7 @@ func TestBrokerShutdown(t *testing.T) {
 			<-finishedMessage
 			return msg
 		}),
-		WithPartition(clique, newKey(local)),
+		WithPartition(clique, local),
 		disableAckTimeouts(),
 		disableStabilization(),
 	)
@@ -915,7 +929,7 @@ func TestBrokerShutdown(t *testing.T) {
 
 		pubsub.Publish(ctx, requestStream, marshalMsg(msg{
 			id:     7,
-			reply:  b.routing.local,
+			reply:  []byte(nodeStream(b.clique, b.routing.local)),
 			stream: []byte(requestStream),
 			data:   []byte("request data"),
 		}))
@@ -948,10 +962,10 @@ func TestBrokerStabilization(t *testing.T) {
 
 	ctx := context.Background()
 
-	local := intKey(1)
+	local := Key(1)
 	localStream := nodeStream(clique, local)
 
-	remote := intKey(11)
+	remote := Key(11)
 
 	pubsub := newPubsubRecorder()
 	remoteChan, remoteSub := pubsub.SubscribeChan(ctx, nodeStream(clique, remote))
@@ -970,7 +984,7 @@ func TestBrokerStabilization(t *testing.T) {
 			pendingReplies: make(map[uint64]pendingReply),
 		}
 
-		b.routing.register(keys(remote))
+		b.routing.registerKey(remote)
 
 		// subscribe clique
 		err := b.pubsub.subscribe(ctx, nodeStream(clique, local), "", b.processCliqueProtocol)
@@ -1015,7 +1029,7 @@ func TestBrokerStabilization(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case ping.id != pingID || !ping.sender.equal(local):
+			case ping.id != pingID || ping.sender != local:
 				t.Errorf("unexpected ping: %+v", ping)
 				t.Fail()
 				return
@@ -1023,7 +1037,7 @@ func TestBrokerStabilization(t *testing.T) {
 
 			pubsub.Publish(ctx, localStream, marshalInfo(info{
 				id:        pingID,
-				neighbors: keys(remote),
+				neighbors: keys{0, 0, 0, 0, 0, 0, 0, byte(remote)},
 			}))
 
 			switch {
@@ -1031,8 +1045,8 @@ func TestBrokerStabilization(t *testing.T) {
 				t.Errorf("unexpected pending reply: %d", pingID)
 				t.Fail()
 				return
-			case !containsKey(keys(b.routing.keys), remote):
-				t.Errorf("unexpected routing keys: %v", b.routing.keys)
+			case !containsKey(b.routing.keys, remote):
+				t.Errorf("unexpected routing keys: %+v", b.routing.keys)
 				t.Fail()
 				return
 			}
@@ -1070,7 +1084,7 @@ func TestBrokerStabilization(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 				t.Fail()
 				return
-			case ping.id != pingID || !ping.sender.equal(local):
+			case ping.id != pingID || ping.sender != local:
 				t.Errorf("unexpected ping: %+v", ping)
 				t.Fail()
 				return
@@ -1083,10 +1097,14 @@ func TestBrokerStabilization(t *testing.T) {
 		switch {
 		case hasPendingReply(b, pingID):
 			t.Fatalf("unexpected pending reply: %d", pingID)
-		case containsKey(keys(b.routing.keys), remote):
-			t.Fatalf("unexpected routing keys: %v", b.routing.keys)
+		case containsKey(b.routing.keys, remote):
+			t.Fatalf("unexpected routing keys: %+v", b.routing.keys)
 		}
 	})
+}
+
+func nextID(b *Broker) uint64 {
+	return atomic.AddUint64(&b.id, 1)
 }
 
 func lastID(b *Broker) uint64 {
@@ -1106,4 +1124,8 @@ func disableStabilization() Option {
 
 func disableAckTimeouts() Option {
 	return WithAckTimeout(time.Hour)
+}
+
+func disableReqTimeouts() Option {
+	return WithRequestTimeout(time.Hour)
 }

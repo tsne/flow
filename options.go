@@ -27,9 +27,11 @@ type options struct {
 	codec           Codec
 	errorHandler    func(error)
 	clique          string
-	nodeKey         key
+	nodeKey         Key
+	hasNodeKey      bool
 	stabilization   Stabilization
 	ackTimeout      time.Duration
+	reqTimeout      time.Duration
 }
 
 func defaultOptions() options {
@@ -40,13 +42,13 @@ func defaultOptions() options {
 		codec:           DefaultCodec{},
 		errorHandler:    func(err error) { fmt.Fprintln(os.Stderr, err) },
 		clique:          defaultClique,
-		nodeKey:         nil, // will be set in 'apply'
 		stabilization: Stabilization{
 			Successors:  5,
 			Stabilizers: 5,
 			Interval:    10 * time.Second,
 		},
-		ackTimeout: 750 * time.Millisecond,
+		ackTimeout: 500 * time.Millisecond,
+		reqTimeout: time.Second,
 	}
 }
 
@@ -63,9 +65,9 @@ func (o *options) apply(opts ...Option) error {
 		return optionError("cannot subscribe to node stream")
 	}
 
-	if len(o.nodeKey) == 0 {
-		o.nodeKey = alloc(KeySize, nil)
-		if err := randomKey(o.nodeKey); err != nil {
+	if !o.hasNodeKey {
+		var err error
+		if o.nodeKey, err = RandomKey(); err != nil {
 			return err
 		}
 	}
@@ -143,8 +145,8 @@ func WithPartition(clique string, key Key) Option {
 		}
 
 		o.clique = clique
-		o.nodeKey = alloc(KeySize, o.nodeKey)
-		copy(o.nodeKey, key[:])
+		o.nodeKey = key
+		o.hasNodeKey = true
 		return nil
 	}
 }
@@ -196,6 +198,17 @@ func WithAckTimeout(d time.Duration) Option {
 			return optionError("non-positive ack timeout")
 		}
 		o.ackTimeout = d
+		return nil
+	}
+}
+
+// WithRequestTimeout defines the timeout for responding to sent requests.
+func WithRequestTimeout(d time.Duration) Option {
+	return func(o *options) error {
+		if d <= 0 {
+			return optionError("non-positive request timeout")
+		}
+		o.reqTimeout = d
 		return nil
 	}
 }

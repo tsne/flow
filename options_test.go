@@ -1,7 +1,6 @@
 package flow
 
 import (
-	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -28,6 +27,8 @@ func TestDefaultOptions(t *testing.T) {
 		t.Fatalf("unexpected stabilization interval: %v", opts.stabilization.Interval)
 	case opts.ackTimeout <= 0:
 		t.Fatalf("unexpected ack timeout: %v", opts.ackTimeout)
+	case opts.reqTimeout <= 0:
+		t.Fatalf("unexpected req timeout: %v", opts.reqTimeout)
 	}
 }
 
@@ -47,8 +48,8 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 		t.Fatalf("unexpected codec: %T", opts.codec)
 	case opts.clique != defaultOpts.clique:
 		t.Fatalf("unexpected clique: %s", opts.clique)
-	case len(opts.nodeKey) == 0:
-		t.Fatal("expected node id to be not empty")
+	case opts.nodeKey == defaultOpts.nodeKey:
+		t.Fatalf("unexpected node key: %s", opts.nodeKey)
 	case opts.stabilization.Successors != defaultOpts.stabilization.Successors:
 		t.Fatalf("unexpected successor count: %d", opts.stabilization.Successors)
 	case opts.stabilization.Stabilizers != defaultOpts.stabilization.Stabilizers:
@@ -57,6 +58,8 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 		t.Fatalf("unexpected stabilization interval: %v", opts.stabilization.Interval)
 	case opts.ackTimeout != defaultOpts.ackTimeout:
 		t.Fatalf("unexpected ack timeout: %v", opts.ackTimeout)
+	case opts.reqTimeout != defaultOpts.reqTimeout:
+		t.Fatalf("unexpected req timeout: %v", opts.reqTimeout)
 	}
 }
 
@@ -165,8 +168,8 @@ func TestOptionWithPartition(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	case opts.clique != defaultClique:
 		t.Fatalf("unexpected clique: %s", opts.clique)
-	case !bytes.Equal(opts.nodeKey, key[:]):
-		t.Fatalf("unexpected node key: %s", printableKey(opts.nodeKey))
+	case opts.nodeKey != key:
+		t.Fatalf("unexpected node key: %s", opts.nodeKey)
 	}
 
 	key = KeyFromString("key two")
@@ -176,8 +179,8 @@ func TestOptionWithPartition(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	case opts.clique != "not-the-default-clique":
 		t.Fatalf("unexpected clique: %s", opts.clique)
-	case !bytes.Equal(opts.nodeKey, key[:]):
-		t.Fatalf("unexpected node key: %s", printableKey(opts.nodeKey))
+	case opts.nodeKey != key:
+		t.Fatalf("unexpected node key: %s", opts.nodeKey)
 	}
 }
 
@@ -276,5 +279,30 @@ func TestOptionWithAckTimeout(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	case opts.ackTimeout != time.Second:
 		t.Fatalf("unexpected successor count: %d", opts.ackTimeout)
+	}
+}
+
+func TestOptionWithRequestTimeout(t *testing.T) {
+	var opts options
+
+	// negative
+	err := opts.apply(WithRequestTimeout(-1))
+	if err == nil {
+		t.Fatal("error expected, got none")
+	}
+
+	// zero
+	err = opts.apply(WithRequestTimeout(0))
+	if err == nil {
+		t.Fatal("error expected, got none")
+	}
+
+	// positive
+	err = opts.apply(WithRequestTimeout(time.Second))
+	switch {
+	case err != nil:
+		t.Fatalf("unexpected error: %v", err)
+	case opts.reqTimeout != time.Second:
+		t.Fatalf("unexpected successor count: %d", opts.reqTimeout)
 	}
 }

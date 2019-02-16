@@ -3,12 +3,12 @@ package flow
 import "sync"
 
 type routingTable struct {
-	local           key // immutable
+	local           Key // immutable
 	successorCount  int // immutable
 	stabilizerCount int // immutable
 
 	mtx     sync.RWMutex
-	keys    ring
+	keys    keyRing
 	succIdx int
 	stabIdx int // index of the next stabilizer
 }
@@ -21,26 +21,32 @@ func newRoutingTable(opts options) routingTable {
 	}
 }
 
-func (r *routingTable) register(keys keys) {
+func (r *routingTable) registerKey(k Key) {
+	r.mtx.Lock()
+	r.addKey(k)
+	r.mtx.Unlock()
+}
+
+func (r *routingTable) registerKeys(keys keys) {
 	n := keys.length()
 
 	r.mtx.Lock()
-	r.keys.reserve(r.keys.length() + n)
+	r.keys.reserve(len(r.keys) + n)
 	for i := 0; i < n; i++ {
 		r.addKey(keys.at(i))
 	}
 	r.mtx.Unlock()
 }
 
-func (r *routingTable) unregister(k key) {
-	if !k.equal(r.local) {
+func (r *routingTable) unregister(k Key) {
+	if k != r.local {
 		r.mtx.Lock()
 		r.removeKey(k)
 		r.mtx.Unlock()
 	}
 }
 
-func (r *routingTable) suspect(k key) {
+func (r *routingTable) suspect(k Key) {
 	// TODO: For now, we simply unregister the address.
 	// As an improvement, the address could be stored
 	// for a retry in some point of the future.
@@ -48,84 +54,81 @@ func (r *routingTable) suspect(k key) {
 }
 
 // returns predecessor + successors + local
-func (r *routingTable) neighbors(buf keys) keys {
+func (r *routingTable) neighbors() (keys keys) {
 	neighborCount := r.successorCount + 1
 
-	var size int
 	r.mtx.RLock()
-	if nkeys := r.keys.length(); neighborCount > nkeys {
-		buf = makeKeys(nkeys+1, buf)
-		size = copy(buf, r.keys)
+	if nkeys := len(r.keys); neighborCount > nkeys {
+		keys = makeKeys(nkeys + 1)
+		for i := 0; i < nkeys; i++ {
+			keys.set(i, r.keys[i])
+		}
 	} else {
 		idx := r.succIdx - 1
 		if idx < 0 {
 			idx = nkeys - 1
 		}
-		buf = makeKeys(neighborCount+1, buf)
-		p := buf.slice(0, neighborCount)
-		size = copy(p, r.keys.slice(idx, nkeys))
-		size += copy(p[size:], r.keys)
+		keys = makeKeys(neighborCount + 1)
+		for i := 0; i < neighborCount; i++ {
+			keys.set(i, r.keys[(idx+i)%nkeys])
+		}
 	}
 	r.mtx.RUnlock()
 
-	copy(buf[size:], r.local)
-	return buf
+	keys.set(keys.length()-1, r.local)
+	return keys
 }
 
 // returns succcessor and stabilizers
-func (r *routingTable) stabilizers(buf keys) keys {
-	stabilizerCount := 1 + r.stabilizerCount
-
+func (r *routingTable) stabilizers(stabs []Key) (n int) {
 	r.mtx.RLock()
-	if nkeys := r.keys.length(); stabilizerCount > nkeys {
-		buf = makeKeys(nkeys, buf)
-		copy(buf, r.keys)
+	if nkeys := len(r.keys); len(stabs) > nkeys {
+		n = copy(stabs, r.keys)
 	} else {
 		r.stabIdx %= nkeys
-		buf = makeKeys(stabilizerCount, buf)
-		copy(buf, r.keys.at(r.succIdx))
-		n := copy(buf[KeySize:], r.keys.slice(r.stabIdx, nkeys))
-		copy(buf[KeySize+n:], r.keys)
+		stabs[0] = r.keys[r.succIdx]
+		n = 1
+		n += copy(stabs[n:], r.keys[r.stabIdx:])
+		n += copy(stabs[n:], r.keys)
 		r.stabIdx += r.stabilizerCount
 	}
-
 	r.mtx.RUnlock()
-	return buf
+	return n
 }
 
-func (r *routingTable) successor(k key, buf key) key {
-	buf = buf[:0]
+func (r *routingTable) successor(k Key) Key {
+	succ := r.local
 
 	r.mtx.RLock()
 	if idx := r.keys.successor(k); idx >= 0 {
 		prevIdx := idx - 1
 		if prevIdx < 0 {
-			prevIdx = r.keys.length() - 1
+			prevIdx = len(r.keys) - 1
 		}
 
-		curr := r.keys.at(idx)
-		prev := r.keys.at(prevIdx)
+		curr := r.keys[idx]
+		prev := r.keys[prevIdx]
 		if (prevIdx != idx && !r.local.between(prev, curr)) || !k.between(prev, r.local) {
-			buf = curr.clone(buf)
+			succ = curr
 		}
 	}
 	r.mtx.RUnlock()
-	return buf
+	return succ
 }
 
 // The following functions have unprotected access.
 // These functions should only be used within the
 // routing table.
 
-func (r *routingTable) addKey(k key) {
-	if k.equal(r.local) {
+func (r *routingTable) addKey(k Key) {
+	if k == r.local {
 		return
 	}
 
-	if r.keys.length() == 0 {
+	if len(r.keys) == 0 {
 		r.succIdx = r.keys.add(k)
 	} else {
-		updateSucc := k.between(r.local, r.keys.at(r.succIdx))
+		updateSucc := k.between(r.local, r.keys[r.succIdx])
 		idx := r.keys.add(k)
 		if updateSucc && idx >= 0 {
 			r.succIdx = idx
@@ -133,10 +136,10 @@ func (r *routingTable) addKey(k key) {
 	}
 }
 
-func (r *routingTable) removeKey(k key) {
+func (r *routingTable) removeKey(k Key) {
 	if idx := r.keys.remove(k); idx < r.succIdx {
 		r.succIdx--
-	} else if idx == r.succIdx && r.succIdx == r.keys.length() {
+	} else if idx == r.succIdx && r.succIdx == len(r.keys) {
 		r.succIdx = 0
 	}
 }

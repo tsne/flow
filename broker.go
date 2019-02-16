@@ -2,7 +2,6 @@ package flow
 
 import (
 	"context"
-	"encoding/hex"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,8 +25,9 @@ type reply struct {
 }
 
 type pendingReply struct {
-	receiver key
+	receiver Key
 	replych  chan reply
+	timer    *time.Timer
 }
 
 // Broker represents a single node within a clique. It enables
@@ -42,6 +42,7 @@ type Broker struct {
 
 	clique     string
 	ackTimeout time.Duration
+	reqTimeout time.Duration
 	codec      Codec
 	onError    func(error)
 
@@ -74,6 +75,7 @@ func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error)
 	b := &Broker{
 		clique:          opts.clique,
 		ackTimeout:      opts.ackTimeout,
+		reqTimeout:      opts.reqTimeout,
 		codec:           opts.codec,
 		onError:         opts.errorHandler,
 		routing:         newRoutingTable(opts),
@@ -173,11 +175,10 @@ func (b *Broker) Request(ctx context.Context, request Message) (Message, error) 
 		return Message{}, err
 	}
 
-	id := b.nextID()
-	reply := b.awaitReply(ctx, id, nil, func(ctx context.Context) error {
+	reply := b.awaitReply(ctx, b.routing.local, b.reqTimeout, func(ctx context.Context, id uint64) error {
 		return b.pubsub.send(ctx, request.Stream, marshalMsg(msg{
 			id:     id,
-			reply:  b.routing.local,
+			reply:  []byte(nodeStream(b.clique, b.routing.local)),
 			stream: []byte(request.Stream),
 			pkey:   request.PartitionKey,
 			data:   request.Data,
@@ -207,7 +208,7 @@ func (b *Broker) processRequest(ctx context.Context, stream string, data []byte)
 	atomic.AddUint64(&b.requestsInFlight, 1)
 	defer atomic.AddUint64(&b.requestsInFlight, ^uint64(0))
 
-	f, err := frameFromBytes(data)
+	f, err := unmarshalFrame(data)
 	switch {
 	case err != nil:
 		b.onError(errorf("request subscription: %v", err))
@@ -227,7 +228,7 @@ func (b *Broker) processRequest(ctx context.Context, stream string, data []byte)
 }
 
 func (b *Broker) processCliqueProtocol(ctx context.Context, stream string, data []byte) {
-	f, err := frameFromBytes(data)
+	f, err := unmarshalFrame(data)
 	if err != nil {
 		b.onError(errorf("clique subscription: %v", err))
 		return
@@ -257,12 +258,12 @@ func (b *Broker) handleJoin(ctx context.Context, f frame) {
 	case err != nil:
 		b.onError(errorf("unmarshal join: %v", err))
 		return
-	case join.sender.equal(b.routing.local):
+	case join.sender == b.routing.local:
 		return
 	}
 
-	neighbors := b.routing.neighbors(nil)
-	b.routing.register(keys(join.sender))
+	neighbors := b.routing.neighbors()
+	b.routing.registerKey(join.sender)
 
 	err = b.sendTo(ctx, join.sender, marshalInfo(info{neighbors: neighbors}))
 	if err != nil {
@@ -287,7 +288,7 @@ func (b *Broker) handleInfo(f frame) {
 		return
 	}
 
-	b.routing.register(info.neighbors)
+	b.routing.registerKeys(info.neighbors)
 	b.notifyReply(info.id, reply{})
 }
 
@@ -300,7 +301,7 @@ func (b *Broker) handlePing(ctx context.Context, f frame) {
 
 	err = b.sendTo(ctx, ping.sender, marshalInfo(info{
 		id:        ping.id,
-		neighbors: b.routing.neighbors(nil),
+		neighbors: b.routing.neighbors(),
 	}))
 	if err != nil {
 		b.onError(errorf("send info: %v", err))
@@ -338,35 +339,24 @@ func (b *Broker) forwardMsg(ctx context.Context, msg msg) {
 		return
 	}
 
-	var (
-		keybuf   Key
-		fwdFrame frame
-		id       uint64
-	)
-
 	partition := KeyFromBytes(msg.pkey)
 	for {
-		succ := b.routing.successor(partition[:], keybuf[:])
-		if len(succ) == 0 {
+		succ := b.routing.successor(partition)
+		if succ == b.routing.local {
 			b.dispatchMsg(ctx, msg)
 			return
 		}
 
-		if len(fwdFrame) == 0 {
-			id = b.nextID()
-			fwdFrame = marshalFwd(fwd{
+		reply := b.awaitReply(ctx, succ, b.ackTimeout, func(ctx context.Context, id uint64) error {
+			return b.sendTo(ctx, succ, marshalFwd(fwd{
 				id:  id,
 				ack: b.routing.local,
 				msg: msg,
-			})
-		}
-
-		reply := b.awaitReply(ctx, id, succ, func(ctx context.Context) error {
-			return b.sendTo(ctx, succ, fwdFrame)
+			}))
 		})
 		if reply.err == nil {
 			return
-		} else if reply.err != context.DeadlineExceeded {
+		} else if reply.err != ErrTimeout {
 			b.onError(reply.err)
 			return
 		}
@@ -398,28 +388,30 @@ func (b *Broker) dispatchMsg(ctx context.Context, msg msg) {
 
 	if len(msg.reply) != 0 {
 		ack := ack{id: msg.id, data: reply.data}
-		err := b.sendTo(ctx, msg.reply, marshalAck(ack))
+		err := b.pubsub.send(ctx, string(msg.reply), marshalAck(ack))
 		if err != nil {
 			b.onError(errorf("send ack: %v", err))
 		}
 	}
 }
 
-func (b *Broker) awaitReply(ctx context.Context, id uint64, receiver key, send func(context.Context) error) reply {
+func (b *Broker) awaitReply(ctx context.Context, receiver Key, timeout time.Duration, send func(context.Context, uint64) error) reply {
+	id := atomic.AddUint64(&b.id, 1)
 	replych := make(chan reply, 1)
+
 	b.pendingRepliesMtx.Lock()
 	b.pendingReplies[id] = pendingReply{
 		receiver: receiver,
 		replych:  replych,
+		timer: time.AfterFunc(timeout, func() {
+			b.notifyReply(id, reply{err: ErrTimeout})
+		}),
 	}
 	b.pendingRepliesMtx.Unlock()
 
-	if err := send(ctx); err != nil {
+	if err := send(ctx, id); err != nil {
 		b.notifyReply(id, reply{err: err})
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, b.ackTimeout)
-	defer cancel()
 
 	select {
 	case reply := <-replych:
@@ -438,23 +430,20 @@ func (b *Broker) notifyReply(id uint64, reply reply) {
 	b.pendingRepliesMtx.Unlock()
 
 	if has {
-		if reply.err == context.DeadlineExceeded && len(pending.receiver) != 0 {
+		pending.timer.Stop()
+		if reply.err == ErrTimeout && pending.receiver != b.routing.local {
 			b.routing.suspect(pending.receiver)
 		}
 		pending.replych <- reply
 	}
 }
 
-func (b *Broker) sendTo(ctx context.Context, target key, f frame) error {
+func (b *Broker) sendTo(ctx context.Context, target Key, f frame) error {
 	return b.pubsub.send(ctx, nodeStream(b.clique, target), f)
 }
 
 func (b *Broker) broadcast(ctx context.Context, f frame) error {
 	return b.pubsub.send(ctx, b.clique, f)
-}
-
-func (b *Broker) nextID() uint64 {
-	return atomic.AddUint64(&b.id, 1)
 }
 
 func (b *Broker) isShuttingDown() bool {
@@ -496,11 +485,9 @@ func (b *Broker) stabilize(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	var (
-		frame frame
-		stabs keys
-	)
+	var frame frame
 
+	stabs := make([]Key, 1+b.routing.stabilizerCount) // successor + stabilizers
 	for {
 		select {
 		case <-b.leaving:
@@ -508,27 +495,26 @@ func (b *Broker) stabilize(interval time.Duration) {
 		case <-ticker.C:
 		}
 
-		stabs = b.routing.stabilizers(stabs)
-		for i, n := 0, stabs.length(); i < n; i++ {
-			stab := stabs.at(i)
-			ping.id = b.nextID()
-			frame = marshalPing(ping, frame)
-
-			reply := b.awaitReply(context.Background(), ping.id, stab, func(ctx context.Context) error {
+		nstabs := b.routing.stabilizers(stabs)
+		for i := 0; i < nstabs; i++ {
+			stab := stabs[i]
+			reply := b.awaitReply(context.Background(), stab, b.ackTimeout, func(ctx context.Context, id uint64) error {
+				ping.id = id
+				frame = marshalPing(ping, frame)
 				return b.sendTo(ctx, stab, frame)
 			})
 
-			if reply.err != nil && reply.err != ErrClosed && reply.err != context.DeadlineExceeded {
+			if reply.err != nil && reply.err != ErrClosed && reply.err != ErrTimeout {
 				b.onError(errorf("stabilization: %v", reply.err))
 			}
 		}
 	}
 }
 
-func nodeStream(clique string, node key) string {
-	buf := alloc(len(clique)+1+2*KeySize, nil)
+func nodeStream(clique string, node Key) string {
+	buf := alloc(len(clique)+1+2*keySize, nil)
 	n := copy(buf, clique)
 	buf[n] = '.'
-	hex.Encode(buf[n+1:], node)
+	node.writeString(buf[n+1:])
 	return string(buf)
 }

@@ -28,9 +28,9 @@ const (
 	frameTypePing  = frameType(uint('P')<<24 | uint('I')<<16 | uint('N')<<8 | uint('G'))
 
 	// messages
+	frameTypeMsg = frameType(uint('M')<<24 | uint('S')<<16 | uint('G')<<8 | uint(' '))
 	frameTypeFwd = frameType(uint('F')<<24 | uint('W')<<16 | uint('D')<<8 | uint(' '))
 	frameTypeAck = frameType(uint('A')<<24 | uint('C')<<16 | uint('K')<<8 | uint(' '))
-	frameTypeMsg = frameType(uint('M')<<24 | uint('S')<<16 | uint('G')<<8 | uint(' '))
 )
 
 func (t frameType) String() string {
@@ -45,19 +45,19 @@ func (t frameType) String() string {
 
 type frame []byte
 
-func frameFromBytes(p []byte) (frame, error) {
-	if len(p) < frameHeaderLen || len(p) < frameHeaderLen+frame(p).payloadSize() {
-		return nil, errMalformedFrame
-	}
-	return frame(p), nil
-}
-
 func newFrame(typ frameType, payloadSize int, buf frame) frame {
 	buf = alloc(frameHeaderLen+payloadSize, buf)
 	binary.BigEndian.PutUint32(buf[0:4], protocolVersion)
 	binary.BigEndian.PutUint32(buf[4:8], uint32(typ))
 	binary.BigEndian.PutUint32(buf[8:12], uint32(payloadSize))
 	return buf
+}
+
+func unmarshalFrame(p []byte) (frame, error) {
+	if len(p) < frameHeaderLen || len(p) < frameHeaderLen+frame(p).payloadSize() {
+		return nil, errMalformedFrame
+	}
+	return frame(p), nil
 }
 
 func (f frame) typ() frameType {
@@ -74,17 +74,17 @@ func (f frame) payload() []byte {
 
 // join
 type join struct {
-	sender key
+	sender Key
 }
 
 func marshalJoin(join join) frame {
-	f := newFrame(frameTypeJoin, len(join.sender), nil)
-	copy(f.payload(), join.sender)
+	f := newFrame(frameTypeJoin, keySize, nil)
+	marshalKey(join.sender, f.payload())
 	return f
 }
 
 func unmarshalJoin(f frame) (join join, err error) {
-	if join.sender, err = keyFromBytes(f.payload()); err != nil {
+	if join.sender, err = unmarshalKey(f.payload()); err != nil {
 		return join, errMalformedJoin
 	}
 	return join, nil
@@ -92,17 +92,17 @@ func unmarshalJoin(f frame) (join join, err error) {
 
 // leave
 type leave struct {
-	node key
+	node Key
 }
 
 func marshalLeave(leave leave) frame {
-	f := newFrame(frameTypeLeave, len(leave.node), nil)
-	copy(f.payload(), leave.node)
+	f := newFrame(frameTypeLeave, keySize, nil)
+	marshalKey(leave.node, f.payload())
 	return f
 }
 
 func unmarshalLeave(f frame) (leave leave, err error) {
-	if leave.node, err = keyFromBytes(f.payload()); err != nil {
+	if leave.node, err = unmarshalKey(f.payload()); err != nil {
 		return leave, errMalformedLeave
 	}
 	return leave, nil
@@ -130,7 +130,7 @@ func unmarshalInfo(f frame) (info info, err error) {
 	}
 
 	info.id = binary.BigEndian.Uint64(p)
-	if info.neighbors, err = keysFromBytes(p[8:]); err != nil {
+	if info.neighbors, err = unmarshalKeys(p[8:]); err != nil {
 		return info, errMalformedInfo
 	}
 	return info, nil
@@ -139,26 +139,26 @@ func unmarshalInfo(f frame) (info info, err error) {
 // ping
 type ping struct {
 	id     uint64 // used for replies
-	sender key
+	sender Key
 }
 
 func marshalPing(ping ping, buf frame) frame {
-	f := newFrame(frameTypePing, 8+len(ping.sender), buf)
+	f := newFrame(frameTypePing, 8+keySize, buf)
 	p := f.payload()
 
 	binary.BigEndian.PutUint64(p, ping.id)
-	copy(p[8:], ping.sender)
+	marshalKey(ping.sender, p[8:])
 	return f
 }
 
 func unmarshalPing(f frame) (ping ping, err error) {
 	p := f.payload()
-	if len(p) < 8+KeySize {
+	if len(p) < 8+keySize {
 		return ping, errMalformedPing
 	}
 
 	ping.id = binary.BigEndian.Uint64(p)
-	if ping.sender, err = keyFromBytes(p[8:]); err != nil {
+	if ping.sender, err = unmarshalKey(p[8:]); err != nil {
 		return ping, errMalformedPing
 	}
 	return ping, nil
@@ -167,7 +167,7 @@ func unmarshalPing(f frame) (ping ping, err error) {
 // msg
 type msg struct {
 	id     uint64
-	reply  key // optional
+	reply  []byte // node stream of sender
 	stream []byte
 	pkey   []byte
 	data   []byte
@@ -203,7 +203,6 @@ func unmarshalMsgPayload(p []byte) (msg msg, err error) {
 	if len(p) < minSize+int(replyLen) {
 		return msg, errMalformedMsg
 	}
-
 	streamLen := binary.BigEndian.Uint32(p[12+replyLen:])
 	if len(p) < minSize+int(replyLen+streamLen) {
 		return msg, errMalformedMsg
@@ -234,29 +233,31 @@ func unmarshalMsg(f frame) (msg msg, err error) {
 // fwd
 type fwd struct {
 	id  uint64
-	ack key
-	msg msg
+	ack Key
+	msg msg // needs to be last
 }
 
 func marshalFwd(fwd fwd) frame {
-	f := newFrame(frameTypeFwd, 8+KeySize+msgSize(fwd.msg), nil)
+	f := newFrame(frameTypeFwd, 8+keySize+msgSize(fwd.msg), nil)
 	p := f.payload()
 
 	binary.BigEndian.PutUint64(p, fwd.id)
-	copy(p[8:], fwd.ack)
-	marshalMsgPayload(fwd.msg, p[8+KeySize:])
+	marshalKey(fwd.ack, p[8:])
+	marshalMsgPayload(fwd.msg, p[8+keySize:])
 	return f
 }
 
 func unmarshalFwd(f frame) (fwd fwd, err error) {
 	p := f.payload()
-	if len(p) < 8+KeySize {
+	if len(p) < 8+keySize {
 		return fwd, errMalformedFwd
 	}
 
 	fwd.id = binary.BigEndian.Uint64(p)
-	fwd.ack = p[8 : 8+KeySize]
-	if fwd.msg, err = unmarshalMsgPayload(p[8+KeySize:]); err != nil {
+	if fwd.ack, err = unmarshalKey(p[8 : 8+keySize]); err != nil {
+		return fwd, errMalformedFwd
+	}
+	if fwd.msg, err = unmarshalMsgPayload(p[8+keySize:]); err != nil {
 		return fwd, errMalformedFwd
 	}
 	return fwd, nil
