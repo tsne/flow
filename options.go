@@ -3,6 +3,7 @@ package flow
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -26,6 +27,7 @@ type options struct {
 	requestHandlers map[string]RequestHandler
 	codec           Codec
 	errorHandler    func(error)
+	partitionLocks  []sync.Mutex
 	clique          string
 	nodeKey         Key
 	hasNodeKey      bool
@@ -147,6 +149,22 @@ func WithPartition(clique string, key Key) Option {
 		o.clique = clique
 		o.nodeKey = key
 		o.hasNodeKey = true
+		return nil
+	}
+}
+
+// WithSyncPartitions instructs the broker to run at most 'slots' message or
+// request handlers in parallel. All partitions will be processed synchronously,
+// i.e. a message or request handler will not be called in parallel for the same
+// partition key. Messages without a partition key are still processed in
+// parallel.
+func WithSyncPartitions(slots int) Option {
+	return func(o *options) error {
+		if slots <= 0 {
+			return optionError("non-positive number of synchronous partition slots")
+		}
+
+		o.partitionLocks = make([]sync.Mutex, slots)
 		return nil
 	}
 }

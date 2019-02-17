@@ -17,6 +17,8 @@ func TestDefaultOptions(t *testing.T) {
 		t.Fatalf("unexpected codec: %T", opts.codec)
 	case opts.errorHandler == nil:
 		t.Fatal("expected error handler, got none")
+	case len(opts.partitionLocks) != 0:
+		t.Fatalf("unexpected number of partition locks: %d", len(opts.partitionLocks))
 	case opts.clique == "":
 		t.Fatal("unexpected empty clique")
 	case opts.stabilization.Successors <= 0:
@@ -46,6 +48,8 @@ func TestOptionsApplyWithoutUserOptions(t *testing.T) {
 		t.Fatalf("unexpected request handlers: %v", opts.requestHandlers)
 	case opts.codec != defaultOpts.codec:
 		t.Fatalf("unexpected codec: %T", opts.codec)
+	case len(opts.partitionLocks) != len(defaultOpts.partitionLocks):
+		t.Fatalf("unexpected number of partition locks: %d", len(opts.partitionLocks))
 	case opts.clique != defaultOpts.clique:
 		t.Fatalf("unexpected clique: %s", opts.clique)
 	case opts.nodeKey == defaultOpts.nodeKey:
@@ -181,6 +185,28 @@ func TestOptionWithPartition(t *testing.T) {
 		t.Fatalf("unexpected clique: %s", opts.clique)
 	case opts.nodeKey != key:
 		t.Fatalf("unexpected node key: %s", opts.nodeKey)
+	}
+}
+
+func TestOptionWithSyncPartitions(t *testing.T) {
+	var opts options
+
+	err := opts.apply(WithSyncPartitions(-1))
+	if err == nil {
+		t.Fatal("error expected, got none")
+	}
+
+	err = opts.apply(WithSyncPartitions(0))
+	if err == nil {
+		t.Fatal("error expected, got none")
+	}
+
+	err = opts.apply(WithSyncPartitions(3))
+	switch {
+	case err != nil:
+		t.Fatalf("unexpected error: %v", err)
+	case len(opts.partitionLocks) != 3:
+		t.Fatalf("unexpected number of partition locks: %d", len(opts.partitionLocks))
 	}
 }
 

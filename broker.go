@@ -40,11 +40,12 @@ type Broker struct {
 	requestsInFlight uint64
 	shuttingDown     uint64
 
-	clique     string
-	ackTimeout time.Duration
-	reqTimeout time.Duration
-	codec      Codec
-	onError    func(error)
+	partitionLocks []sync.Mutex
+	clique         string
+	ackTimeout     time.Duration
+	reqTimeout     time.Duration
+	codec          Codec
+	onError        func(error)
 
 	routing routingTable
 	pubsub  pubsub
@@ -73,6 +74,7 @@ func NewBroker(ctx context.Context, pubsub PubSub, o ...Option) (*Broker, error)
 	}
 
 	b := &Broker{
+		partitionLocks:  opts.partitionLocks,
 		clique:          opts.clique,
 		ackTimeout:      opts.ackTimeout,
 		reqTimeout:      opts.reqTimeout,
@@ -334,16 +336,16 @@ func (b *Broker) handleAck(frame frame) {
 }
 
 func (b *Broker) forwardMsg(ctx context.Context, msg msg) {
+	partition := KeyFromBytes(msg.pkey)
 	if len(msg.pkey) == 0 {
-		b.dispatchMsg(ctx, msg)
+		b.dispatchMsg(ctx, msg, partition)
 		return
 	}
 
-	partition := KeyFromBytes(msg.pkey)
 	for {
 		succ := b.routing.successor(partition)
 		if succ == b.routing.local {
-			b.dispatchMsg(ctx, msg)
+			b.dispatchMsg(ctx, msg, partition)
 			return
 		}
 
@@ -367,20 +369,32 @@ func (b *Broker) forwardMsg(ctx context.Context, msg msg) {
 	}
 }
 
-func (b *Broker) dispatchMsg(ctx context.Context, msg msg) {
+func (b *Broker) dispatchMsg(ctx context.Context, msg msg, partition Key) {
+	var lock, slot = sync.Locker(nullLock{}), -1
+	if len(msg.pkey) != 0 && len(b.partitionLocks) != 0 {
+		slot = int(partition % Key(len(b.partitionLocks)))
+		lock = &b.partitionLocks[slot]
+	}
+
 	var reply reply
 	if h := b.messageHandlers[string(msg.stream)]; h != nil {
+		lock.Lock()
 		h(ctx, Message{
 			Stream:       string(msg.stream),
 			PartitionKey: msg.pkey,
 			Data:         msg.data,
+			slot:         slot,
 		})
+		lock.Unlock()
 	} else if h := b.requestHandlers[string(msg.stream)]; h != nil {
+		lock.Lock()
 		resp := h(ctx, Message{
 			Stream:       string(msg.stream),
 			PartitionKey: msg.pkey,
 			Data:         msg.data,
+			slot:         slot,
 		})
+		lock.Unlock()
 		reply.data = resp.Data
 	} else {
 		return
@@ -518,3 +532,8 @@ func nodeStream(clique string, node Key) string {
 	node.writeString(buf[n+1:])
 	return string(buf)
 }
+
+type nullLock struct{}
+
+func (l nullLock) Lock()   {}
+func (l nullLock) Unlock() {}

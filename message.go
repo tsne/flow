@@ -9,6 +9,15 @@ type Message struct {
 	Stream       string // published to the pub/sub system
 	PartitionKey []byte // the key for partitioning
 	Data         []byte // the data which should be sent
+	slot         int
+}
+
+// Slot returns the slot in which the handler is processed. If a message
+// has a partition key and partitions are processed synchronously, the
+// returned slot will be between 0 and the number of configured slots
+// (see WithSyncPartitions). Otherwise -1 will be returned.
+func (m *Message) Slot() int {
+	return m.slot
 }
 
 func (m *Message) validate() error {
