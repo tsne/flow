@@ -11,6 +11,14 @@ import (
 // Option represents an option to configure NATS connections.
 type Option func(*nats.Options) error
 
+// ClientName defines a name for the connected client.
+func ClientName(name string) Option {
+	return func(o *nats.Options) error {
+		o.Name = name
+		return nil
+	}
+}
+
 // TLS enables secure connections to the NATS servers.
 func TLS(conf *tls.Config) Option {
 	return func(o *nats.Options) error {
